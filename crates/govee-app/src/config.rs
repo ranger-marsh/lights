@@ -38,12 +38,7 @@ pub fn save(names: &HashMap<String, String>) -> std::io::Result<()> {
     let Some(path) = config_path() else {
         return Ok(());
     };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let text = serde_json::to_string_pretty(names)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(path, text)
+    atomic_write(&path, names)
 }
 
 // ── Groups ────────────────────────────────────────────────────────────────────
@@ -78,12 +73,26 @@ pub fn save_groups(groups: &[Group]) -> std::io::Result<()> {
     let Some(path) = groups_path() else {
         return Ok(());
     };
+    atomic_write(&path, groups)
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Write `value` as pretty JSON to `path` atomically: serialise to a
+/// sibling `.tmp` file first, then rename over the target so a crash or
+/// concurrent write can never leave a half-written file behind.
+fn atomic_write<T: serde::Serialize + ?Sized>(
+    path: &std::path::Path,
+    value: &T,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let text = serde_json::to_string_pretty(groups)
+    let tmp = path.with_extension("tmp");
+    let text = serde_json::to_string_pretty(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(path, text)
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]
