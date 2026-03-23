@@ -5,6 +5,7 @@ use std::sync::mpsc;
 
 use govee_core::models::{Color, Device, DeviceState};
 
+use crate::config;
 use crate::worker::{Command, WorkerEvent};
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -15,6 +16,16 @@ pub struct GoveeApp {
     pub devices: Vec<Device>,
     pub states: HashMap<String, DeviceState>,
     pub selected: usize,
+
+    // ── Persisted names (MAC → display name) ─────────────────────────────────
+    /// Loaded from disk at startup; written back whenever the user renames a device.
+    pub names: HashMap<String, String>,
+
+    // ── Rename UI state ───────────────────────────────────────────────────────
+    /// MAC of the device currently being renamed, or `None` if no rename is active.
+    pub renaming: Option<String>,
+    /// Text buffer for the rename input field.
+    pub rename_buf: String,
 
     // ── Status bar ───────────────────────────────────────────────────────────
     pub status: String,
@@ -37,11 +48,15 @@ pub struct GoveeApp {
 
 impl GoveeApp {
     /// Create a new app wired to the given channel pair.
+    /// Saved device names are loaded from disk immediately.
     pub fn new(cmd_tx: mpsc::Sender<Command>, evt_rx: mpsc::Receiver<WorkerEvent>) -> Self {
         Self {
             devices: Vec::new(),
             states: HashMap::new(),
             selected: 0,
+            names: config::load(),
+            renaming: None,
+            rename_buf: String::new(),
             status: "Starting\u{2026}".to_string(),
             status_is_error: false,
             pending_brightness: 100,
@@ -75,6 +90,52 @@ impl GoveeApp {
         }
     }
 
+    // ── Rename ────────────────────────────────────────────────────────────────
+
+    /// Begin renaming the device with the given MAC.
+    pub fn start_rename(&mut self, mac: &str) {
+        // Pre-fill with the current display name.
+        let current = self
+            .devices
+            .iter()
+            .find(|d| d.mac == mac)
+            .map(|d| d.display_name().to_string())
+            .unwrap_or_default();
+        self.rename_buf = current;
+        self.renaming = Some(mac.to_string());
+    }
+
+    /// Commit the current rename buffer: update the device in memory, persist to disk.
+    pub fn commit_rename(&mut self) {
+        let Some(mac) = self.renaming.take() else {
+            return;
+        };
+        let name = self.rename_buf.trim().to_string();
+
+        if name.is_empty() {
+            // Empty name → remove any stored override (fall back to SKU).
+            self.names.remove(&mac);
+        } else {
+            self.names.insert(mac.clone(), name.clone());
+        }
+
+        // Update the in-memory Device so the UI reflects the change immediately.
+        if let Some(d) = self.devices.iter_mut().find(|d| d.mac == mac) {
+            d.name = if name.is_empty() { None } else { Some(name) };
+        }
+
+        if let Err(e) = config::save(&self.names) {
+            self.status = format!("Warning: could not save names: {e}");
+            self.status_is_error = true;
+        }
+    }
+
+    /// Cancel an in-progress rename without saving.
+    pub fn cancel_rename(&mut self) {
+        self.renaming = None;
+        self.rename_buf.clear();
+    }
+
     // ── Event processing ──────────────────────────────────────────────────────
 
     /// Drain all pending [`WorkerEvent`]s and update state accordingly.
@@ -82,8 +143,14 @@ impl GoveeApp {
     pub fn process_events(&mut self) {
         while let Ok(evt) = self.evt_rx.try_recv() {
             match evt {
-                WorkerEvent::Discovered(devices) => {
+                WorkerEvent::Discovered(mut devices) => {
                     self.selected = 0;
+                    // Apply any stored name overrides before handing to the UI.
+                    for device in &mut devices {
+                        if let Some(name) = self.names.get(&device.mac) {
+                            device.name = Some(name.clone());
+                        }
+                    }
                     self.devices = devices;
                 }
                 WorkerEvent::StateUpdated { mac, state } => {
@@ -131,8 +198,8 @@ impl eframe::App for GoveeApp {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 /// Parse a CSS-style hex color string (`RRGGBB` or `#RRGGBB`) into a [`Color`].
+#[allow(dead_code)]
 pub fn parse_hex_color(s: &str) -> Option<Color> {
     let s = s.trim_start_matches('#');
     if s.len() != 6 {
@@ -206,5 +273,72 @@ mod tests {
         ];
         app.selected = 1;
         assert_eq!(app.selected_device().unwrap().mac, "AA:02");
+    }
+
+    #[test]
+    fn commit_rename_updates_device_name() {
+        let mut app = make_app();
+        app.devices = vec![Device::new("AA:BB:CC:DD:EE:01", "H6072")];
+
+        app.start_rename("AA:BB:CC:DD:EE:01");
+        assert!(app.renaming.is_some());
+
+        app.rename_buf = "Living Room".to_string();
+        app.commit_rename();
+
+        assert!(app.renaming.is_none());
+        assert_eq!(app.devices[0].display_name(), "Living Room");
+        assert_eq!(app.names["AA:BB:CC:DD:EE:01"], "Living Room");
+    }
+
+    #[test]
+    fn commit_rename_empty_clears_name() {
+        let mut app = make_app();
+        app.devices = vec![{
+            let mut d = Device::new("AA:BB:CC:DD:EE:01", "H6072");
+            d.name = Some("Old Name".to_string());
+            d
+        }];
+        app.names.insert("AA:BB:CC:DD:EE:01".to_string(), "Old Name".to_string());
+
+        app.start_rename("AA:BB:CC:DD:EE:01");
+        app.rename_buf = "   ".to_string(); // whitespace only → clear
+        app.commit_rename();
+
+        assert_eq!(app.devices[0].display_name(), "H6072"); // falls back to SKU
+        assert!(!app.names.contains_key("AA:BB:CC:DD:EE:01"));
+    }
+
+    #[test]
+    fn cancel_rename_leaves_name_unchanged() {
+        let mut app = make_app();
+        app.devices = vec![Device::new("AA:BB", "H6072")];
+
+        app.start_rename("AA:BB");
+        app.rename_buf = "New Name".to_string();
+        app.cancel_rename();
+
+        assert!(app.renaming.is_none());
+        assert_eq!(app.devices[0].display_name(), "H6072"); // unchanged
+    }
+
+    #[test]
+    fn discovered_devices_get_stored_names_applied() {
+        let mut app = make_app();
+        app.names.insert("AA:BB:CC:DD:EE:01".to_string(), "Bedroom".to_string());
+
+        // Simulate receiving a Discovered event.
+        let devices = vec![Device::new("AA:BB:CC:DD:EE:01", "H6072")];
+        let _ = app.cmd_tx.clone(); // keep tx alive
+        // Manually apply the same logic process_events uses:
+        let mut devices = devices;
+        for d in &mut devices {
+            if let Some(name) = app.names.get(&d.mac) {
+                d.name = Some(name.clone());
+            }
+        }
+        app.devices = devices;
+
+        assert_eq!(app.devices[0].display_name(), "Bedroom");
     }
 }

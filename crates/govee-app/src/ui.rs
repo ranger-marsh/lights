@@ -4,8 +4,8 @@
 //! ```text
 //! ┌────────────────────────────────────────────────────────┐
 //! │  [left panel]  Device list + Scan button               │
-//! │  [central]     Controls for the selected device        │
-//! │  [bottom bar]  Status message                          │
+//! │  [central]     Controls + rename for selected device   │
+//! │  [bottom bar]  Status message + config file path       │
 //! └────────────────────────────────────────────────────────┘
 //! ```
 
@@ -13,6 +13,7 @@ use egui::{Color32, RichText};
 use govee_core::models::Color;
 
 use crate::app::GoveeApp;
+use crate::config;
 use crate::worker::Command;
 
 // ── Top-level draw ────────────────────────────────────────────────────────────
@@ -28,14 +29,29 @@ pub fn draw(ctx: &egui::Context, app: &mut GoveeApp) {
 
 fn draw_status_bar(ctx: &egui::Context, app: &GoveeApp) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-        ui.add_space(4.0);
-        let text = RichText::new(&app.status).small();
-        let colored = if app.status_is_error {
-            text.color(Color32::from_rgb(220, 80, 80))
-        } else {
-            text.color(Color32::GRAY)
-        };
-        ui.label(colored);
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            // Status message
+            let text = RichText::new(&app.status).small();
+            let colored = if app.status_is_error {
+                text.color(Color32::from_rgb(220, 80, 80))
+            } else {
+                text.color(Color32::GRAY)
+            };
+            ui.label(colored);
+
+            // Config file path hint (right-aligned)
+            if let Some(path) = config::config_path() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        RichText::new(path.display().to_string())
+                            .small()
+                            .color(Color32::from_gray(70)),
+                    );
+                    ui.label(RichText::new("names file:").small().color(Color32::from_gray(55)));
+                });
+            }
+        });
         ui.add_space(2.0);
     });
 }
@@ -70,7 +86,6 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
                         let is_on = state.map(|s| s.on);
                         let is_selected = i == app.selected;
 
-                        // Power indicator dot
                         let dot = match is_on {
                             Some(true) => RichText::new("\u{25cf}").color(Color32::from_rgb(80, 220, 80)),
                             Some(false) => RichText::new("\u{25cb}").color(Color32::DARK_GRAY),
@@ -115,7 +130,10 @@ fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
         };
 
         ui.add_space(8.0);
-        ui.heading(device.display_name());
+
+        // ── Device heading + rename ───────────────────────────────────────
+        draw_rename_section(ui, app, &device.mac);
+
         ui.add_space(2.0);
         ui.label(RichText::new(&device.mac).small().color(Color32::DARK_GRAY));
         ui.add_space(12.0);
@@ -167,7 +185,6 @@ fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
                     egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000)
                         .suffix(" K"),
                 );
-                // Visual warm→cool gradient label
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Warm").color(Color32::from_rgb(255, 180, 80)).small());
                     ui.label(RichText::new("\u{2194}").small().color(Color32::GRAY));
@@ -239,6 +256,55 @@ fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
             });
         }
     });
+}
+
+// ── Rename section ────────────────────────────────────────────────────────────
+
+fn draw_rename_section(ui: &mut egui::Ui, app: &mut GoveeApp, mac: &str) {
+    let is_renaming = app.renaming.as_deref() == Some(mac);
+
+    if is_renaming {
+        // Text field + Save / Cancel
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut app.rename_buf)
+                    .hint_text("Device name\u{2026}")
+                    .desired_width(180.0),
+            );
+            // Auto-focus the field when it first appears.
+            response.request_focus();
+
+            let save = ui.button("Save").clicked()
+                || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+
+            if save {
+                app.commit_rename();
+            } else if ui.button("Cancel").clicked()
+                || ui.input(|i| i.key_pressed(egui::Key::Escape))
+            {
+                app.cancel_rename();
+            }
+        });
+    } else {
+        // Heading + pencil button
+        let name = app
+            .devices
+            .iter()
+            .find(|d| d.mac == mac)
+            .map(|d| d.display_name().to_string())
+            .unwrap_or_default();
+
+        ui.horizontal(|ui| {
+            ui.heading(&name);
+            if ui
+                .small_button("\u{270f}")
+                .on_hover_text("Rename this device")
+                .clicked()
+            {
+                app.start_rename(mac);
+            }
+        });
+    }
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────────

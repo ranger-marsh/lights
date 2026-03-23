@@ -8,6 +8,7 @@
 //!   - `evt_tx` / `evt_rx`  — Worker sends [`worker::WorkerEvent`]s to the GUI.
 
 mod app;
+mod config;
 mod ui;
 mod worker;
 
