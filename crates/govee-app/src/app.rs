@@ -8,14 +8,26 @@ use govee_core::models::{Color, Device, DeviceState};
 use crate::config;
 use crate::worker::{BroadcastAction, Command, WorkerEvent};
 
+/// Maximum number of groups the user can create.
+pub const MAX_GROUPS: usize = 10;
+
 // ── Tab selection ─────────────────────────────────────────────────────────────
 
 /// Which top-level tab is active in the central panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
-    #[default]
-    Individual,
+    /// Control all discovered devices at once.
     All,
+    /// Control a single selected device.
+    Individual,
+    /// Control a named group of devices (index into `GoveeApp::groups`).
+    Group(usize),
+}
+
+impl Default for Tab {
+    fn default() -> Self {
+        Tab::All
+    }
 }
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -30,6 +42,14 @@ pub struct GoveeApp {
     // ── Persisted names (MAC → display name) ─────────────────────────────────
     /// Loaded from disk at startup; written back whenever the user renames a device.
     pub names: HashMap<String, String>,
+
+    // ── Groups ────────────────────────────────────────────────────────────────
+    /// Persisted named groups (max [`MAX_GROUPS`]).
+    pub groups: Vec<config::Group>,
+    /// Index of the group whose name is being edited, or `None`.
+    pub renaming_group: Option<usize>,
+    /// Text buffer for the group rename input field.
+    pub group_rename_buf: String,
 
     // ── Rename UI state ───────────────────────────────────────────────────────
     /// MAC of the device currently being renamed, or `None` if no rename is active.
@@ -68,6 +88,9 @@ impl GoveeApp {
             states: HashMap::new(),
             selected: 0,
             names: config::load(),
+            groups: config::load_groups(),
+            renaming_group: None,
+            group_rename_buf: String::new(),
             renaming: None,
             rename_buf: String::new(),
             status: "Starting\u{2026}".to_string(),
@@ -148,6 +171,106 @@ impl GoveeApp {
     pub fn cancel_rename(&mut self) {
         self.renaming = None;
         self.rename_buf.clear();
+    }
+
+    // ── Groups ────────────────────────────────────────────────────────────────
+
+    /// Create a new group (no-op if already at [`MAX_GROUPS`]) and switch to it.
+    pub fn add_group(&mut self) {
+        if self.groups.len() >= MAX_GROUPS {
+            return;
+        }
+        let n = self.groups.len() + 1;
+        self.groups.push(config::Group {
+            name: format!("Group {n}"),
+            macs: Vec::new(),
+        });
+        self.tab = Tab::Group(self.groups.len() - 1);
+        self.persist_groups();
+    }
+
+    /// Delete the group at `idx` and fix the active tab if needed.
+    pub fn delete_group(&mut self, idx: usize) {
+        if idx >= self.groups.len() {
+            return;
+        }
+        self.groups.remove(idx);
+        self.tab = match self.tab {
+            Tab::Group(i) if i == idx => Tab::All,
+            Tab::Group(i) if i > idx => Tab::Group(i - 1),
+            other => other,
+        };
+        self.persist_groups();
+    }
+
+    /// Add a device to a group if it isn't already a member; remove it if it is.
+    pub fn toggle_device_in_group(&mut self, group_idx: usize, mac: &str) {
+        let Some(group) = self.groups.get_mut(group_idx) else {
+            return;
+        };
+        if let Some(pos) = group.macs.iter().position(|m| m == mac) {
+            group.macs.remove(pos);
+        } else {
+            group.macs.push(mac.to_string());
+        }
+        self.persist_groups();
+    }
+
+    /// Returns the subset of discovered devices that belong to `group_idx`.
+    pub fn group_devices(&self, group_idx: usize) -> Vec<Device> {
+        let Some(group) = self.groups.get(group_idx) else {
+            return Vec::new();
+        };
+        self.devices
+            .iter()
+            .filter(|d| group.macs.contains(&d.mac))
+            .cloned()
+            .collect()
+    }
+
+    /// Broadcast an action to only the devices in a group.
+    pub fn broadcast_group(&self, group_idx: usize, action: BroadcastAction) {
+        let devices = self.group_devices(group_idx);
+        if !devices.is_empty() {
+            self.send(Command::Broadcast(devices, action));
+        }
+    }
+
+    /// Begin renaming the group at `idx`.
+    pub fn start_rename_group(&mut self, idx: usize) {
+        if let Some(g) = self.groups.get(idx) {
+            self.group_rename_buf = g.name.clone();
+            self.renaming_group = Some(idx);
+        }
+    }
+
+    /// Commit the group rename buffer to memory and disk.
+    pub fn commit_rename_group(&mut self) {
+        let Some(idx) = self.renaming_group.take() else {
+            return;
+        };
+        let name = self.group_rename_buf.trim().to_string();
+        if let Some(g) = self.groups.get_mut(idx) {
+            g.name = if name.is_empty() {
+                format!("Group {}", idx + 1)
+            } else {
+                name
+            };
+        }
+        self.persist_groups();
+    }
+
+    /// Cancel an in-progress group rename without saving.
+    pub fn cancel_rename_group(&mut self) {
+        self.renaming_group = None;
+        self.group_rename_buf.clear();
+    }
+
+    fn persist_groups(&mut self) {
+        if let Err(e) = config::save_groups(&self.groups) {
+            self.status = format!("Warning: could not save groups: {e}");
+            self.status_is_error = true;
+        }
     }
 
     // ── Event processing ──────────────────────────────────────────────────────

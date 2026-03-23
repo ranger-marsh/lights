@@ -118,17 +118,38 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
 
 fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        // Tab bar
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut app.tab, Tab::Individual, "Individual");
-            ui.selectable_value(&mut app.tab, Tab::All, "All Lights");
-        });
+        // Tab bar — horizontal scroll in case many groups are present
+        egui::ScrollArea::horizontal()
+            .id_salt("tab_bar")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut app.tab, Tab::All, "All Lights");
+                    ui.selectable_value(&mut app.tab, Tab::Individual, "Individual");
+
+                    let group_count = app.groups.len();
+                    for i in 0..group_count {
+                        let name = app.groups[i].name.clone();
+                        ui.selectable_value(&mut app.tab, Tab::Group(i), name);
+                    }
+
+                    if group_count < crate::app::MAX_GROUPS {
+                        if ui
+                            .small_button("+")
+                            .on_hover_text("New group")
+                            .clicked()
+                        {
+                            app.add_group();
+                        }
+                    }
+                });
+            });
         ui.separator();
         ui.add_space(6.0);
 
         match app.tab {
-            Tab::Individual => draw_individual(ui, app),
             Tab::All => draw_all_lights(ui, app),
+            Tab::Individual => draw_individual(ui, app),
+            Tab::Group(i) => draw_group(ui, app, i),
         }
     });
 }
@@ -411,6 +432,190 @@ fn draw_all_lights(ui: &mut egui::Ui, app: &mut GoveeApp) {
                 ui.end_row();
             }
         });
+}
+
+// ── Group tab ─────────────────────────────────────────────────────────────────
+
+fn draw_group(ui: &mut egui::Ui, app: &mut GoveeApp, idx: usize) {
+    if app.groups.get(idx).is_none() {
+        // Guard: tab index stale after a delete races with a frame.
+        app.tab = crate::app::Tab::All;
+        return;
+    }
+
+    ui.add_space(8.0);
+
+    // ── Group heading + rename ────────────────────────────────────────────────
+    if app.renaming_group == Some(idx) {
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut app.group_rename_buf)
+                    .hint_text("Group name\u{2026}")
+                    .desired_width(180.0),
+            );
+            response.request_focus();
+
+            let save = ui.button("Save").clicked()
+                || (response.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+            if save {
+                app.commit_rename_group();
+            } else if ui.button("Cancel").clicked()
+                || ui.input(|i| i.key_pressed(egui::Key::Escape))
+            {
+                app.cancel_rename_group();
+            }
+        });
+    } else {
+        let name = app.groups[idx].name.clone();
+        ui.horizontal(|ui| {
+            ui.heading(&name);
+            if ui
+                .small_button("\u{270f}")
+                .on_hover_text("Rename this group")
+                .clicked()
+            {
+                app.start_rename_group(idx);
+            }
+        });
+    }
+
+    ui.add_space(10.0);
+
+    // ── Member checkboxes ─────────────────────────────────────────────────────
+    section(ui, "Members", |ui| {
+        let devices: Vec<_> = app.devices.clone();
+        if devices.is_empty() {
+            ui.label(
+                RichText::new("No devices discovered yet.")
+                    .small()
+                    .color(Color32::GRAY),
+            );
+        } else {
+            let macs = app.groups[idx].macs.clone();
+            let mut to_toggle: Option<String> = None;
+            for device in &devices {
+                let mut checked = macs.contains(&device.mac);
+                if ui
+                    .checkbox(&mut checked, device.display_name())
+                    .changed()
+                {
+                    to_toggle = Some(device.mac.clone());
+                }
+            }
+            if let Some(mac) = to_toggle {
+                app.toggle_device_in_group(idx, &mac);
+            }
+        }
+    });
+
+    ui.add_space(10.0);
+
+    // ── Controls (only shown when there are members) ──────────────────────────
+    let member_count = app.group_devices(idx).len();
+    if member_count == 0 {
+        ui.label(
+            RichText::new("Add devices above to control this group.")
+                .color(Color32::GRAY),
+        );
+    } else {
+        // Power
+        section(ui, "Power", |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(
+                        RichText::new("\u{25cf}  Turn ON")
+                            .color(Color32::from_rgb(80, 220, 80))
+                            .size(15.0),
+                    )
+                    .clicked()
+                {
+                    app.broadcast_group(idx, BroadcastAction::Power(true));
+                }
+                ui.add_space(8.0);
+                if ui
+                    .button(
+                        RichText::new("\u{25cb}  Turn OFF")
+                            .color(Color32::GRAY)
+                            .size(15.0),
+                    )
+                    .clicked()
+                {
+                    app.broadcast_group(idx, BroadcastAction::Power(false));
+                }
+            });
+        });
+
+        ui.add_space(10.0);
+
+        // Brightness
+        section(ui, "Brightness", |ui| {
+            ui.add(
+                egui::Slider::new(&mut app.pending_brightness, 1_u8..=100).suffix("%"),
+            );
+            if ui.button("Apply to Group").clicked() {
+                let pct = app.pending_brightness;
+                app.broadcast_group(idx, BroadcastAction::Brightness(pct));
+            }
+        });
+
+        ui.add_space(10.0);
+
+        // Color
+        section(ui, "Color", |ui| {
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut app.use_color_temp, false, "RGB");
+                ui.radio_value(&mut app.use_color_temp, true, "White / Color Temp");
+            });
+            ui.add_space(6.0);
+
+            if app.use_color_temp {
+                ui.add(
+                    egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000)
+                        .suffix(" K"),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Warm")
+                            .color(Color32::from_rgb(255, 180, 80))
+                            .small(),
+                    );
+                    ui.label(RichText::new("\u{2194}").small().color(Color32::GRAY));
+                    ui.label(
+                        RichText::new("Cool")
+                            .color(Color32::from_rgb(160, 200, 255))
+                            .small(),
+                    );
+                });
+                if ui.button("Apply to Group").clicked() {
+                    let k = app.pending_color_temp;
+                    app.broadcast_group(idx, BroadcastAction::ColorTemp(k));
+                }
+            } else {
+                egui::color_picker::color_edit_button_rgb(ui, &mut app.pending_color);
+                if ui.button("Apply to Group").clicked() {
+                    let [r, g, b] = app.pending_color;
+                    let color = Color::new(
+                        (r * 255.0).round() as u8,
+                        (g * 255.0).round() as u8,
+                        (b * 255.0).round() as u8,
+                    );
+                    app.broadcast_group(idx, BroadcastAction::Color(color));
+                }
+            }
+        });
+    }
+
+    // ── Delete group ─────────────────────────────────────────────────────────
+    ui.add_space(16.0);
+    ui.separator();
+    ui.add_space(6.0);
+    if ui
+        .button(RichText::new("Delete Group").color(Color32::from_rgb(200, 80, 80)))
+        .clicked()
+    {
+        app.delete_group(idx);
+    }
 }
 
 // ── Rename section ────────────────────────────────────────────────────────────

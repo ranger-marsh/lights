@@ -876,6 +876,7 @@ dependencies = [
  "eframe",
  "egui",
  "govee-core",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

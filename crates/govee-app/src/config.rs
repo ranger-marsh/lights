@@ -1,22 +1,17 @@
-//! Persistent device name configuration.
+//! Persistent configuration: device names and light groups.
 //!
-//! Names are stored as a JSON object mapping MAC address → display name:
+//! Files live in `~/.config/govee-lights/` on both macOS and Linux/Raspberry Pi:
 //!
-//! ```json
-//! {
-//!   "AA:BB:CC:DD:EE:01": "Living Room",
-//!   "AA:BB:CC:DD:EE:02": "Bedroom"
-//! }
-//! ```
+//! - `names.json`  — MAC → display name mapping
+//! - `groups.json` — list of named device groups
 //!
-//! File location: `~/.config/govee-lights/names.json`
-//! (on both macOS and Linux/Raspberry Pi)
-//!
-//! To transfer names to the Pi, copy this file to the same path:
-//!   scp ~/.config/govee-lights/names.json pi@raspberrypi:~/.config/govee-lights/names.json
+//! To transfer config to the Pi:
+//!   scp ~/.config/govee-lights/*.json pi@raspberrypi:~/.config/govee-lights/
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 
 const APP_DIR: &str = "govee-lights";
 const FILE_NAME: &str = "names.json";
@@ -47,6 +42,46 @@ pub fn save(names: &HashMap<String, String>) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let text = serde_json::to_string_pretty(names)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(path, text)
+}
+
+// ── Groups ────────────────────────────────────────────────────────────────────
+
+/// A named group of devices, persisted to `groups.json`.
+///
+/// Devices are identified by MAC address so names survive rediscovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Group {
+    pub name: String,
+    pub macs: Vec<String>,
+}
+
+/// Path to the groups config file.
+pub fn groups_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join(APP_DIR).join("groups.json"))
+}
+
+/// Load groups from disk. Returns an empty `Vec` on any error.
+pub fn load_groups() -> Vec<Group> {
+    let Some(path) = groups_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&text).unwrap_or_default()
+}
+
+/// Persist groups to disk.
+pub fn save_groups(groups: &[Group]) -> std::io::Result<()> {
+    let Some(path) = groups_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let text = serde_json::to_string_pretty(groups)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(path, text)
 }
