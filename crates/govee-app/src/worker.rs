@@ -58,6 +58,9 @@ pub enum Command {
     Rediscover,
     /// Send the same action to every device in the list, then refresh each.
     Broadcast(Vec<Device>, BroadcastAction),
+    /// Apply a scene: turn each device on, set its paired colour and brightness,
+    /// then refresh.  Each entry is `(device, rgb_color, brightness_pct)`.
+    ApplyScene(Vec<(Device, Color, u8)>),
 }
 
 /// The control action applied to all devices in a [`Command::Broadcast`].
@@ -387,6 +390,30 @@ async fn handle_command(
         Command::Rediscover => {
             offline.clear();
             discover(lan, send, known, offline).await;
+        }
+
+        Command::ApplyScene(entries) => {
+            let count = entries.len();
+            send(WorkerEvent::Status(format!(
+                "Applying scene to {count} device(s)\u{2026}"
+            )));
+
+            for (device, color, brightness) in &entries {
+                // Turn the light on so the scene is immediately visible.
+                let _ = lan.set_power(device, true).await;
+                if let Err(e) = lan.set_brightness(device, *brightness).await {
+                    warn!("Scene brightness error for {}: {e}", device.display_name());
+                }
+                if let Err(e) = lan.set_color(device, *color).await {
+                    warn!("Scene color error for {}: {e}", device.display_name());
+                }
+            }
+
+            tokio::time::sleep(POST_COMMAND_DELAY).await;
+            for (device, _, _) in &entries {
+                try_refresh(lan, send, device, offline).await;
+            }
+            send(WorkerEvent::Status("Scene applied.".into()));
         }
 
         Command::Broadcast(devices, action) => {

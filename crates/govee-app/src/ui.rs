@@ -14,6 +14,7 @@ use govee_core::models::Color;
 
 use crate::app::{GoveeApp, Tab};
 use crate::config;
+use crate::scenes;
 use crate::worker::{BroadcastAction, Command};
 
 // ── Top-level draw ────────────────────────────────────────────────────────────
@@ -431,6 +432,12 @@ fn draw_all_lights(ui: &mut egui::Ui, app: &mut GoveeApp) {
         }
     });
 
+    ui.add_space(10.0);
+
+    // ── Scenes ────────────────────────────────────────────────────────────────
+    let all_devices = app.devices.clone();
+    draw_scene_picker(ui, app, all_devices, "all");
+
     ui.add_space(12.0);
 
     // ── Device summary grid ───────────────────────────────────────────────────
@@ -678,6 +685,12 @@ fn draw_group(ui: &mut egui::Ui, app: &mut GoveeApp, idx: usize) {
                 }
             }
         });
+
+        ui.add_space(10.0);
+
+        // Scenes
+        let group_devices = app.group_devices(idx);
+        draw_scene_picker(ui, app, group_devices, &format!("group_{idx}"));
     }
 
     // ── Delete group ─────────────────────────────────────────────────────────
@@ -739,6 +752,83 @@ fn draw_rename_section(ui: &mut egui::Ui, app: &mut GoveeApp, mac: &str) {
             }
         });
     }
+}
+
+// ── Scene picker ──────────────────────────────────────────────────────────────
+
+/// Render the scene picker below the colour controls.
+///
+/// `salt` must be unique per call site to give egui distinct scroll-area IDs.
+fn draw_scene_picker(
+    ui: &mut egui::Ui,
+    app: &mut GoveeApp,
+    devices: Vec<govee_core::models::Device>,
+    salt: &str,
+) {
+    section(ui, "Scenes", |ui| {
+        // ── Category selector row ────────────────────────────────────────────
+        ui.horizontal(|ui| {
+            for (i, cat) in scenes::CATEGORIES.iter().enumerate() {
+                ui.selectable_value(&mut app.selected_scene_cat, i, cat.name);
+            }
+        });
+
+        ui.add_space(6.0);
+
+        let cat = &scenes::CATEGORIES[app.selected_scene_cat];
+
+        // ── Scene button grid (scrollable) ───────────────────────────────────
+        egui::ScrollArea::vertical()
+            .id_salt(format!("scene_scroll_{salt}"))
+            .max_height(200.0)
+            .show(ui, |ui| {
+                // 3 buttons per row
+                let scene_count = cat.scenes.len();
+                let mut scene_to_apply: Option<usize> = None;
+
+                egui::Grid::new(format!("scene_grid_{salt}"))
+                    .num_columns(3)
+                    .spacing([8.0, 8.0])
+                    .show(ui, |ui| {
+                        for (i, scene) in cat.scenes.iter().enumerate() {
+                            let btn_resp = ui.add_sized(
+                                [ui.available_width().max(120.0) / (3 - (i % 3)) as f32, 48.0],
+                                egui::Button::new(scene.name),
+                            );
+
+                            // Draw colour-palette swatches along the bottom of the button
+                            let rect = btn_resp.rect;
+                            let n_swatches = scene.palette.len().min(6);
+                            let sw = 10.0_f32;
+                            let gap = 3.0_f32;
+                            let total = n_swatches as f32 * sw + (n_swatches - 1) as f32 * gap;
+                            let mut sx = rect.center().x - total / 2.0;
+                            let sy = rect.bottom() - sw - 4.0;
+                            for j in 0..n_swatches {
+                                let (r, g, b) = scene.palette[j];
+                                let swatch = egui::Rect::from_min_size(
+                                    egui::pos2(sx, sy),
+                                    egui::vec2(sw, sw),
+                                );
+                                ui.painter().rect_filled(swatch, 2.0, Color32::from_rgb(r, g, b));
+                                sx += sw + gap;
+                            }
+
+                            if btn_resp.clicked() {
+                                scene_to_apply = Some(i);
+                            }
+
+                            if (i + 1) % 3 == 0 || i + 1 == scene_count {
+                                ui.end_row();
+                            }
+                        }
+                    });
+
+                if let Some(i) = scene_to_apply {
+                    app.apply_scene_to_devices(devices.clone(), &cat.scenes[i]);
+                }
+            });
+    });
 }
 
 // ── Helper ────────────────────────────────────────────────────────────────────

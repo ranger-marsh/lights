@@ -6,6 +6,7 @@ use std::sync::mpsc;
 use govee_core::models::{Color, Device, DeviceState};
 
 use crate::config;
+use crate::scenes;
 use crate::worker::{BroadcastAction, Command, WorkerEvent};
 
 /// Maximum number of groups the user can create.
@@ -75,6 +76,10 @@ pub struct GoveeApp {
     /// When `true` the color section shows the Kelvin slider; otherwise RGB.
     pub use_color_temp: bool,
 
+    // ── Scenes ────────────────────────────────────────────────────────────────
+    /// Index into [`scenes::CATEGORIES`] for the scene picker.
+    pub selected_scene_cat: usize,
+
     // ── Tab ───────────────────────────────────────────────────────────────────
     pub tab: Tab,
 
@@ -104,6 +109,7 @@ impl GoveeApp {
             pending_color: [1.0, 1.0, 1.0], // white
             pending_color_temp: 4_000,
             use_color_temp: false,
+            selected_scene_cat: 0,
             tab: Tab::default(),
             cmd_tx,
             evt_rx,
@@ -269,6 +275,24 @@ impl GoveeApp {
     pub fn cancel_rename_group(&mut self) {
         self.renaming_group = None;
         self.group_rename_buf.clear();
+    }
+
+    // ── Scenes ────────────────────────────────────────────────────────────────
+
+    /// Apply a scene to an arbitrary list of devices.
+    /// Each device gets `palette[i % palette.len()]` at the scene's brightness.
+    pub fn apply_scene_to_devices(&self, devices: Vec<Device>, scene: &scenes::Scene) {
+        let entries: Vec<(Device, Color, u8)> = devices
+            .into_iter()
+            .enumerate()
+            .map(|(i, device)| {
+                let (r, g, b) = scene.palette[i % scene.palette.len()];
+                (device, Color::new(r, g, b), scene.brightness)
+            })
+            .collect();
+        if !entries.is_empty() {
+            self.send(Command::ApplyScene(entries));
+        }
     }
 
     fn persist_groups(&mut self) {

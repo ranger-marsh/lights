@@ -9,6 +9,7 @@
 
 mod app;
 mod config;
+mod scenes;
 mod ui;
 mod worker;
 
