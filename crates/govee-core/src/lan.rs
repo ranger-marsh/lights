@@ -84,6 +84,9 @@ struct StatusResponseData {
     on_off: u8,
     brightness: u8,
     color: ColorData,
+    // Devices send "colorTemInKelvin" (not the full word "Temperature").
+    // Default to 0 — means the device is in RGB mode, not white-temp mode.
+    #[serde(rename = "colorTemInKelvin", default)]
     color_temperature_kelvin: u16,
 }
 
@@ -377,5 +380,33 @@ mod tests {
     fn encode_query_state() {
         let v = decode(&encode(Command::QueryState));
         assert_eq!(v["msg"]["cmd"], "devStatus");
+    }
+
+    #[test]
+    fn parse_status_response_rgb_mode() {
+        // Real device payload when in RGB mode — colorTemInKelvin is 0.
+        let json = br#"{"msg":{"cmd":"devStatus","data":{"onOff":1,"brightness":75,"color":{"r":255,"g":128,"b":0},"colorTemInKelvin":0}}}"#;
+        let resp: StatusResponse = serde_json::from_slice(json).unwrap();
+        let d = resp.msg.data;
+        assert_eq!(d.on_off, 1);
+        assert_eq!(d.brightness, 75);
+        assert_eq!(d.color.r, 255);
+        assert_eq!(d.color_temperature_kelvin, 0);
+    }
+
+    #[test]
+    fn parse_status_response_color_temp_mode() {
+        // Real device payload when in white/kelvin mode.
+        let json = br#"{"msg":{"cmd":"devStatus","data":{"onOff":1,"brightness":100,"color":{"r":0,"g":0,"b":0},"colorTemInKelvin":4000}}}"#;
+        let resp: StatusResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(resp.msg.data.color_temperature_kelvin, 4000);
+    }
+
+    #[test]
+    fn parse_status_response_missing_color_temp_defaults_to_zero() {
+        // Some devices omit colorTemInKelvin entirely — must not error.
+        let json = br#"{"msg":{"cmd":"devStatus","data":{"onOff":0,"brightness":50,"color":{"r":0,"g":0,"b":255}}}}"#;
+        let resp: StatusResponse = serde_json::from_slice(json).unwrap();
+        assert_eq!(resp.msg.data.color_temperature_kelvin, 0);
     }
 }
