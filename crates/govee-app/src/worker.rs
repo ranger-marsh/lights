@@ -14,6 +14,15 @@ use govee_core::{
 };
 use tracing::warn;
 
+// ── Timing constants ──────────────────────────────────────────────────────────
+
+/// How long to wait for a devStatus response from a device.
+const STATE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long to wait after sending a control command before querying state.
+/// Gives the device time to apply the change before we read it back.
+const POST_COMMAND_DELAY: Duration = Duration::from_millis(400);
+
 // ── Public channel types ──────────────────────────────────────────────────────
 
 /// Commands sent from the GUI thread to the async worker.
@@ -74,7 +83,7 @@ async fn run(
         }
     };
 
-    // Discover devices at startup.
+    // Discover devices at startup, then immediately refresh all their states.
     discover(&lan, &send).await;
 
     // Poll for commands. Using try_recv + a short sleep keeps the async
@@ -90,18 +99,33 @@ async fn run(
     }
 }
 
+/// Discover all devices, then refresh the state of every found device.
 async fn discover(lan: &LanClient, send: &impl Fn(WorkerEvent)) {
     send(WorkerEvent::Status("Discovering devices\u{2026}".into()));
 
     match lan.discover(Duration::from_secs(3)).await {
         Ok(devices) => {
-            let msg = if devices.is_empty() {
-                "No devices found. Enable LAN Control in the Govee app.".to_string()
-            } else {
-                format!("Found {} device(s).", devices.len())
-            };
-            send(WorkerEvent::Discovered(devices));
-            send(WorkerEvent::Status(msg));
+            if devices.is_empty() {
+                send(WorkerEvent::Discovered(vec![]));
+                send(WorkerEvent::Status(
+                    "No devices found. Enable LAN Control in the Govee app.".into(),
+                ));
+                return;
+            }
+
+            let count = devices.len();
+            send(WorkerEvent::Discovered(devices.clone()));
+            send(WorkerEvent::Status(format!(
+                "Found {count} device(s). Refreshing state\u{2026}"
+            )));
+
+            // Refresh each device sequentially — the socket is shared, so
+            // doing them one at a time avoids mixing up responses.
+            for device in &devices {
+                refresh_device(lan, send, device).await;
+            }
+
+            send(WorkerEvent::Status(format!("Ready — {count} device(s).")));
         }
         Err(e) => {
             warn!("Discovery error: {e}");
@@ -111,58 +135,99 @@ async fn discover(lan: &LanClient, send: &impl Fn(WorkerEvent)) {
     }
 }
 
+/// Query a single device's state and send a [`WorkerEvent::StateUpdated`].
+async fn refresh_device(lan: &LanClient, send: &impl Fn(WorkerEvent), device: &Device) {
+    match lan.get_state(device, STATE_TIMEOUT).await {
+        Ok(state) => send(WorkerEvent::StateUpdated {
+            mac: device.mac.clone(),
+            state,
+        }),
+        Err(e) => {
+            warn!("State refresh failed for {}: {e}", device.display_name());
+            send(WorkerEvent::Error(format!(
+                "Refresh error ({}): {e}",
+                device.display_name()
+            )));
+        }
+    }
+}
+
 async fn handle_command(lan: &LanClient, send: &impl Fn(WorkerEvent), cmd: Command) {
     match cmd {
-        Command::SetPower(device, on) => match lan.set_power(&device, on).await {
-            Ok(_) => send(WorkerEvent::Status(format!(
-                "{} turned {}.",
-                device.display_name(),
-                if on { "ON" } else { "OFF" }
-            ))),
-            Err(e) => send(WorkerEvent::Error(format!("Power error: {e}"))),
-        },
+        Command::SetPower(device, on) => {
+            match lan.set_power(&device, on).await {
+                Ok(_) => send(WorkerEvent::Status(format!(
+                    "{} turned {}.",
+                    device.display_name(),
+                    if on { "ON" } else { "OFF" }
+                ))),
+                Err(e) => {
+                    send(WorkerEvent::Error(format!("Power error: {e}")));
+                    return;
+                }
+            }
+            post_command_refresh(lan, send, &device).await;
+        }
 
-        Command::SetBrightness(device, pct) => match lan.set_brightness(&device, pct).await {
-            Ok(_) => send(WorkerEvent::Status(format!(
-                "{} brightness \u{2192} {}%.",
-                device.display_name(),
-                pct
-            ))),
-            Err(e) => send(WorkerEvent::Error(format!("Brightness error: {e}"))),
-        },
+        Command::SetBrightness(device, pct) => {
+            match lan.set_brightness(&device, pct).await {
+                Ok(_) => send(WorkerEvent::Status(format!(
+                    "{} brightness \u{2192} {}%.",
+                    device.display_name(),
+                    pct
+                ))),
+                Err(e) => {
+                    send(WorkerEvent::Error(format!("Brightness error: {e}")));
+                    return;
+                }
+            }
+            post_command_refresh(lan, send, &device).await;
+        }
 
-        Command::SetColor(device, color) => match lan.set_color(&device, color).await {
-            Ok(_) => send(WorkerEvent::Status(format!(
-                "{} color \u{2192} {}.",
-                device.display_name(),
-                color
-            ))),
-            Err(e) => send(WorkerEvent::Error(format!("Color error: {e}"))),
-        },
+        Command::SetColor(device, color) => {
+            match lan.set_color(&device, color).await {
+                Ok(_) => send(WorkerEvent::Status(format!(
+                    "{} color \u{2192} {}.",
+                    device.display_name(),
+                    color
+                ))),
+                Err(e) => {
+                    send(WorkerEvent::Error(format!("Color error: {e}")));
+                    return;
+                }
+            }
+            post_command_refresh(lan, send, &device).await;
+        }
 
-        Command::SetColorTemp(device, k) => match lan.set_color_temp(&device, k).await {
-            Ok(_) => send(WorkerEvent::Status(format!(
-                "{} color temp \u{2192} {}K.",
-                device.display_name(),
-                k
-            ))),
-            Err(e) => send(WorkerEvent::Error(format!("Color temp error: {e}"))),
-        },
+        Command::SetColorTemp(device, k) => {
+            match lan.set_color_temp(&device, k).await {
+                Ok(_) => send(WorkerEvent::Status(format!(
+                    "{} color temp \u{2192} {}K.",
+                    device.display_name(),
+                    k
+                ))),
+                Err(e) => {
+                    send(WorkerEvent::Error(format!("Color temp error: {e}")));
+                    return;
+                }
+            }
+            post_command_refresh(lan, send, &device).await;
+        }
 
         Command::RefreshState(device) => {
-            match lan.get_state(&device, Duration::from_secs(2)).await {
-                Ok(state) => {
-                    let mac = device.mac.clone();
-                    send(WorkerEvent::Status(format!(
-                        "{} state refreshed.",
-                        device.display_name()
-                    )));
-                    send(WorkerEvent::StateUpdated { mac, state });
-                }
-                Err(e) => send(WorkerEvent::Error(format!("Refresh error: {e}"))),
-            }
+            refresh_device(lan, send, &device).await;
+            send(WorkerEvent::Status(format!(
+                "{} state refreshed.",
+                device.display_name()
+            )));
         }
 
         Command::Rediscover => discover(lan, send).await,
     }
+}
+
+/// Wait briefly for the device to apply a command, then read its state back.
+async fn post_command_refresh(lan: &LanClient, send: &impl Fn(WorkerEvent), device: &Device) {
+    tokio::time::sleep(POST_COMMAND_DELAY).await;
+    refresh_device(lan, send, device).await;
 }
