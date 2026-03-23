@@ -1,235 +1,160 @@
-//! Application state and event loop.
+//! Application state and [`eframe::App`] implementation.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::mpsc;
 
-use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use govee_core::{
-    lan::LanClient,
-    models::{Color, Device, DeviceState},
-};
-use ratatui::{Terminal, backend::Backend};
-use tracing::warn;
+use govee_core::models::{Color, Device, DeviceState};
 
-use crate::ui;
+use crate::worker::{Command, WorkerEvent};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputMode {
-    Normal,
-    Prompt(PromptKind),
-}
+// ── App state ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PromptKind {
-    Brightness,
-    Color,
-    ColorTemp,
-}
-
-pub struct App {
+/// Top-level application state, owned by the egui event loop.
+pub struct GoveeApp {
+    // ── Device data ──────────────────────────────────────────────────────────
     pub devices: Vec<Device>,
-    pub states: std::collections::HashMap<String, DeviceState>,
+    pub states: HashMap<String, DeviceState>,
     pub selected: usize,
-    pub input_mode: InputMode,
-    pub input_buf: String,
+
+    // ── Status bar ───────────────────────────────────────────────────────────
     pub status: String,
-    pub quit: bool,
+    pub status_is_error: bool,
+
+    // ── Pending control values (what the sliders/picker currently show) ──────
+    /// Brightness slider value (1–100).
+    pub pending_brightness: u8,
+    /// RGB color for the egui color picker, each channel 0.0–1.0.
+    pub pending_color: [f32; 3],
+    /// Color temperature slider value in Kelvin (2 000–9 000).
+    pub pending_color_temp: u16,
+    /// When `true` the color section shows the Kelvin slider; otherwise RGB.
+    pub use_color_temp: bool,
+
+    // ── Channels ─────────────────────────────────────────────────────────────
+    pub cmd_tx: mpsc::Sender<Command>,
+    pub evt_rx: mpsc::Receiver<WorkerEvent>,
 }
 
-impl App {
-    pub fn new() -> Self {
+impl GoveeApp {
+    /// Create a new app wired to the given channel pair.
+    pub fn new(cmd_tx: mpsc::Sender<Command>, evt_rx: mpsc::Receiver<WorkerEvent>) -> Self {
         Self {
             devices: Vec::new(),
-            states: std::collections::HashMap::new(),
+            states: HashMap::new(),
             selected: 0,
-            input_mode: InputMode::Normal,
-            input_buf: String::new(),
-            status: "Discovering devices\u{2026}".to_string(),
-            quit: false,
+            status: "Starting\u{2026}".to_string(),
+            status_is_error: false,
+            pending_brightness: 100,
+            pending_color: [1.0, 1.0, 1.0], // white
+            pending_color_temp: 4_000,
+            use_color_temp: false,
+            cmd_tx,
+            evt_rx,
         }
     }
+
+    // ── Accessors ─────────────────────────────────────────────────────────────
 
     pub fn selected_device(&self) -> Option<&Device> {
         self.devices.get(self.selected)
     }
 
+    // ── Navigation ────────────────────────────────────────────────────────────
+
+    #[allow(dead_code)]
     pub fn move_up(&mut self) {
         if self.selected > 0 {
             self.selected -= 1;
         }
     }
 
+    #[allow(dead_code)]
     pub fn move_down(&mut self) {
         if !self.devices.is_empty() && self.selected < self.devices.len() - 1 {
             self.selected += 1;
         }
     }
-}
 
-pub async fn run<B: Backend>(terminal: &mut Terminal<B>) -> Result<()> {
-    let lan = LanClient::new().await?;
-    let mut app = App::new();
+    // ── Event processing ──────────────────────────────────────────────────────
 
-    match lan.discover(Duration::from_secs(3)).await {
-        Ok(devices) => {
-            app.status = if devices.is_empty() {
-                "No devices found. Enable LAN Control in the Govee app.".to_string()
-            } else {
-                format!("Found {} device(s). Press ? for help.", devices.len())
-            };
-            app.devices = devices;
-        }
-        Err(e) => {
-            app.status = format!("Discovery failed: {e}");
-            warn!("Discovery error: {e}");
-        }
-    }
-
-    loop {
-        terminal.draw(|f| ui::render(f, &app))?;
-
-        if !event::poll(Duration::from_millis(250))? {
-            continue;
-        }
-
-        let evt = event::read()?;
-        let mode = app.input_mode.clone();
-
-        match mode {
-            InputMode::Normal => handle_normal(&mut app, &lan, evt).await,
-            InputMode::Prompt(kind) => handle_prompt(&mut app, &lan, kind, evt).await,
-        }
-
-        if app.quit {
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-async fn handle_normal(app: &mut App, lan: &LanClient, evt: Event) {
-    let Event::Key(key) = evt else { return };
-    if key.kind != KeyEventKind::Press { return; }
-
-    match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
-        KeyCode::Up | KeyCode::Char('k') => app.move_up(),
-        KeyCode::Down | KeyCode::Char('j') => app.move_down(),
-
-        KeyCode::Char(' ') => {
-            if let Some(device) = app.selected_device().cloned() {
-                let current_on = app.states.get(&device.mac).map(|s| s.on).unwrap_or(false);
-                match lan.set_power(&device, !current_on).await {
-                    Ok(_) => {
-                        app.states.entry(device.mac.clone()).or_default().on = !current_on;
-                        app.status = format!(
-                            "{} turned {}",
-                            device.display_name(),
-                            if !current_on { "ON" } else { "OFF" }
-                        );
+    /// Drain all pending [`WorkerEvent`]s and update state accordingly.
+    /// Called at the start of every egui frame.
+    pub fn process_events(&mut self) {
+        while let Ok(evt) = self.evt_rx.try_recv() {
+            match evt {
+                WorkerEvent::Discovered(devices) => {
+                    self.selected = 0;
+                    self.devices = devices;
+                }
+                WorkerEvent::StateUpdated { mac, state } => {
+                    // Mirror real device state into the pending controls.
+                    self.pending_brightness = state.brightness;
+                    if state.color_temp_kelvin > 0 {
+                        self.use_color_temp = true;
+                        self.pending_color_temp = state.color_temp_kelvin;
+                    } else {
+                        self.use_color_temp = false;
+                        self.pending_color = [
+                            state.color.r as f32 / 255.0,
+                            state.color.g as f32 / 255.0,
+                            state.color.b as f32 / 255.0,
+                        ];
                     }
-                    Err(e) => app.status = format!("Error: {e}"),
+                    self.states.insert(mac, state);
+                }
+                WorkerEvent::Status(msg) => {
+                    self.status = msg;
+                    self.status_is_error = false;
+                }
+                WorkerEvent::Error(msg) => {
+                    self.status = msg;
+                    self.status_is_error = true;
                 }
             }
         }
+    }
 
-        KeyCode::Char('b') => {
-            app.input_mode = InputMode::Prompt(PromptKind::Brightness);
-            app.input_buf.clear();
-            app.status = "Enter brightness (1\u{2013}100):".to_string();
-        }
-        KeyCode::Char('c') => {
-            app.input_mode = InputMode::Prompt(PromptKind::Color);
-            app.input_buf.clear();
-            app.status = "Enter hex color (e.g. FF8000):".to_string();
-        }
-        KeyCode::Char('t') => {
-            app.input_mode = InputMode::Prompt(PromptKind::ColorTemp);
-            app.input_buf.clear();
-            app.status = "Enter color temp in Kelvin (2000\u{2013}9000):".to_string();
-        }
-
-        KeyCode::Char('r') => {
-            if let Some(device) = app.selected_device().cloned() {
-                match lan.get_state(&device, Duration::from_secs(2)).await {
-                    Ok(state) => {
-                        app.status = format!(
-                            "{}: {}  brightness {}%  color {}",
-                            device.display_name(),
-                            if state.on { "ON" } else { "OFF" },
-                            state.brightness,
-                            state.color,
-                        );
-                        app.states.insert(device.mac.clone(), state);
-                    }
-                    Err(e) => app.status = format!("State query failed: {e}"),
-                }
-            }
-        }
-        _ => {}
+    /// Send a command to the async worker (fire-and-forget).
+    pub fn send(&self, cmd: Command) {
+        let _ = self.cmd_tx.send(cmd);
     }
 }
 
-async fn handle_prompt(app: &mut App, lan: &LanClient, kind: PromptKind, evt: Event) {
-    let Event::Key(key) = evt else { return };
-    if key.kind != KeyEventKind::Press { return; }
+// ── eframe integration ────────────────────────────────────────────────────────
 
-    match key.code {
-        KeyCode::Esc => {
-            app.input_mode = InputMode::Normal;
-            app.status = "Cancelled.".to_string();
-        }
-        KeyCode::Backspace => { app.input_buf.pop(); }
-        KeyCode::Char(c) => { app.input_buf.push(c); }
-        KeyCode::Enter => {
-            let input = app.input_buf.trim().to_string();
-            app.input_mode = InputMode::Normal;
-
-            if let Some(device) = app.selected_device().cloned() {
-                let result: std::result::Result<(), String> = match kind {
-                    PromptKind::Brightness => {
-                        match input.parse::<u8>() {
-                            Ok(v) => lan.set_brightness(&device, v).await.map_err(|e| e.to_string()),
-                            Err(_) => Err("invalid number (1\u{2013}100)".to_string()),
-                        }
-                    }
-                    PromptKind::Color => {
-                        match parse_hex_color(&input) {
-                            Some(c) => lan.set_color(&device, c).await.map_err(|e| e.to_string()),
-                            None => Err("invalid hex color (e.g. FF8000)".to_string()),
-                        }
-                    }
-                    PromptKind::ColorTemp => {
-                        match input.parse::<u16>() {
-                            Ok(k) => lan.set_color_temp(&device, k).await.map_err(|e| e.to_string()),
-                            Err(_) => Err("invalid number (2000\u{2013}9000)".to_string()),
-                        }
-                    }
-                };
-
-                app.status = match result {
-                    Ok(_) => format!("Command sent to {}", device.display_name()),
-                    Err(e) => format!("Error: {e}"),
-                };
-            }
-        }
-        _ => {}
+impl eframe::App for GoveeApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.process_events();
+        crate::ui::draw(ctx, self);
     }
 }
 
+// ── Utilities ─────────────────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+/// Parse a CSS-style hex color string (`RRGGBB` or `#RRGGBB`) into a [`Color`].
 pub fn parse_hex_color(s: &str) -> Option<Color> {
     let s = s.trim_start_matches('#');
-    if s.len() != 6 { return None; }
+    if s.len() != 6 {
+        return None;
+    }
     let r = u8::from_str_radix(&s[0..2], 16).ok()?;
     let g = u8::from_str_radix(&s[2..4], 16).ok()?;
     let b = u8::from_str_radix(&s[4..6], 16).ok()?;
     Some(Color::new(r, g, b))
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_app() -> GoveeApp {
+        let (tx, _rx) = mpsc::channel();
+        let (_tx2, rx2) = mpsc::channel();
+        GoveeApp::new(tx, rx2)
+    }
 
     #[test]
     fn parse_hex_color_valid() {
@@ -248,7 +173,7 @@ mod tests {
 
     #[test]
     fn app_navigation() {
-        let mut app = App::new();
+        let mut app = make_app();
         app.devices = vec![
             Device::new("AA:BB:CC:DD:EE:01", "H6072"),
             Device::new("AA:BB:CC:DD:EE:02", "H6072"),
@@ -268,13 +193,13 @@ mod tests {
 
     #[test]
     fn selected_device_empty() {
-        let app = App::new();
+        let app = make_app();
         assert!(app.selected_device().is_none());
     }
 
     #[test]
     fn selected_device_returns_correct() {
-        let mut app = App::new();
+        let mut app = make_app();
         app.devices = vec![
             Device::new("AA:01", "H6072"),
             Device::new("AA:02", "H6073"),

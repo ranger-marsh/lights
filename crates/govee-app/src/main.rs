@@ -1,53 +1,47 @@
-//! Govee lights controller — TUI frontend.
+//! Govee lights controller — egui/eframe GUI frontend.
 //!
-//! Usage:
-//!   GOVEE_API_KEY=<key> govee            # LAN discovery + optional HTTP fallback
-//!   govee                                 # LAN only
-//!
-//! Controls:
-//!   ↑/↓   Select device
-//!   Space  Toggle power
-//!   b      Set brightness (prompts)
-//!   c      Set color (hex prompt)
-//!   t      Set color temperature (prompt)
-//!   r      Refresh device state
-//!   q/Esc  Quit
+//! Architecture:
+//! - The **main thread** runs the eframe event loop (egui renders here).
+//! - A **background thread** owns a Tokio runtime and handles all async LAN I/O.
+//! - The two threads communicate via a pair of `std::sync::mpsc` channels:
+//!   - `cmd_tx` / `cmd_rx`  — GUI sends [`worker::Command`]s to the worker.
+//!   - `evt_tx` / `evt_rx`  — Worker sends [`worker::WorkerEvent`]s to the GUI.
 
 mod app;
 mod ui;
+mod worker;
 
-use anyhow::Result;
-use crossterm::{
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use ratatui::{Terminal, backend::CrosstermBackend};
-use tracing_subscriber::EnvFilter;
+use std::sync::mpsc;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+use app::GoveeApp;
+
+fn main() -> eframe::Result {
+    // Structured logging (respects RUST_LOG env var).
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let mut terminal = setup_terminal()?;
-    let result = app::run(&mut terminal).await;
-    restore_terminal(&mut terminal)?;
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Govee Lights")
+            .with_inner_size([680.0, 460.0])
+            .with_min_inner_size([480.0, 340.0]),
+        ..Default::default()
+    };
 
-    result
-}
+    eframe::run_native(
+        "Govee Lights",
+        options,
+        Box::new(|cc| {
+            let (cmd_tx, cmd_rx) = mpsc::channel();
+            let (evt_tx, evt_rx) = mpsc::channel();
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
-    enable_raw_mode()?;
-    let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    Ok(Terminal::new(backend)?)
-}
+            // Spawn the async LAN worker on a background thread.
+            // We pass the egui Context so it can call request_repaint() when
+            // new events arrive, waking the GUI even while the user is idle.
+            worker::spawn(cmd_rx, evt_tx, cc.egui_ctx.clone());
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    Ok(())
+            Ok(Box::new(GoveeApp::new(cmd_tx, evt_rx)))
+        }),
+    )
 }
