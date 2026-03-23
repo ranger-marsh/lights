@@ -34,6 +34,17 @@ pub enum Command {
     SetColorTemp(Device, u16),
     RefreshState(Device),
     Rediscover,
+    /// Send the same action to every device in the list, then refresh each.
+    Broadcast(Vec<Device>, BroadcastAction),
+}
+
+/// The control action applied to all devices in a [`Command::Broadcast`].
+#[derive(Debug, Clone)]
+pub enum BroadcastAction {
+    Power(bool),
+    Brightness(u8),
+    Color(Color),
+    ColorTemp(u16),
 }
 
 /// Events sent from the async worker back to the GUI thread.
@@ -223,6 +234,40 @@ async fn handle_command(lan: &LanClient, send: &impl Fn(WorkerEvent), cmd: Comma
         }
 
         Command::Rediscover => discover(lan, send).await,
+
+        Command::Broadcast(devices, action) => {
+            let label = match &action {
+                BroadcastAction::Power(on) => {
+                    format!("Turning all lights {}…", if *on { "ON" } else { "OFF" })
+                }
+                BroadcastAction::Brightness(pct) => format!("Setting all brightness → {pct}%…"),
+                BroadcastAction::Color(c) => format!("Setting all color → {c}…"),
+                BroadcastAction::ColorTemp(k) => format!("Setting all color temp → {k}K…"),
+            };
+            send(WorkerEvent::Status(label));
+
+            // Send the command to every device, ignoring per-device errors so
+            // one unresponsive light doesn't block the rest.
+            for device in &devices {
+                let result = match &action {
+                    BroadcastAction::Power(on) => lan.set_power(device, *on).await,
+                    BroadcastAction::Brightness(pct) => lan.set_brightness(device, *pct).await,
+                    BroadcastAction::Color(c) => lan.set_color(device, *c).await,
+                    BroadcastAction::ColorTemp(k) => lan.set_color_temp(device, *k).await,
+                };
+                if let Err(e) = result {
+                    warn!("Broadcast error for {}: {e}", device.display_name());
+                    send(WorkerEvent::Error(format!("{}: {e}", device.display_name())));
+                }
+            }
+
+            // Wait for all devices to apply the change, then refresh each.
+            tokio::time::sleep(POST_COMMAND_DELAY).await;
+            for device in &devices {
+                refresh_device(lan, send, device).await;
+            }
+            send(WorkerEvent::Status("All lights updated.".into()));
+        }
     }
 }
 

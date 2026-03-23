@@ -12,9 +12,9 @@
 use egui::{Color32, RichText};
 use govee_core::models::Color;
 
-use crate::app::GoveeApp;
+use crate::app::{GoveeApp, Tab};
 use crate::config;
-use crate::worker::Command;
+use crate::worker::{BroadcastAction, Command};
 
 // ── Top-level draw ────────────────────────────────────────────────────────────
 
@@ -114,10 +114,28 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
         });
 }
 
-// ── Controls (central panel) ──────────────────────────────────────────────────
+// ── Central panel: tab bar + routed content ───────────────────────────────────
 
 fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
     egui::CentralPanel::default().show(ctx, |ui| {
+        // Tab bar
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut app.tab, Tab::Individual, "Individual");
+            ui.selectable_value(&mut app.tab, Tab::All, "All Lights");
+        });
+        ui.separator();
+        ui.add_space(6.0);
+
+        match app.tab {
+            Tab::Individual => draw_individual(ui, app),
+            Tab::All => draw_all_lights(ui, app),
+        }
+    });
+}
+
+// ── Individual device controls ────────────────────────────────────────────────
+
+fn draw_individual(ui: &mut egui::Ui, app: &mut GoveeApp) {
         let Some(device) = app.selected_device().cloned() else {
             ui.centered_and_justified(|ui| {
                 ui.label(
@@ -255,7 +273,144 @@ fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
                 }
             });
         }
+}
+
+// ── All Lights tab ────────────────────────────────────────────────────────────
+
+fn draw_all_lights(ui: &mut egui::Ui, app: &mut GoveeApp) {
+    if app.devices.is_empty() {
+        ui.centered_and_justified(|ui| {
+            ui.label(
+                RichText::new("No devices found. Try scanning again.")
+                    .color(Color32::GRAY)
+                    .size(16.0),
+            );
+        });
+        return;
+    }
+
+    // ── Power ─────────────────────────────────────────────────────────────────
+    section(ui, "Power — All Lights", |ui| {
+        ui.horizontal(|ui| {
+            if ui
+                .button(RichText::new("\u{25cf}  Turn All ON").color(Color32::from_rgb(80, 220, 80)).size(15.0))
+                .clicked()
+            {
+                app.broadcast(BroadcastAction::Power(true));
+            }
+            ui.add_space(8.0);
+            if ui
+                .button(RichText::new("\u{25cb}  Turn All OFF").color(Color32::GRAY).size(15.0))
+                .clicked()
+            {
+                app.broadcast(BroadcastAction::Power(false));
+            }
+        });
     });
+
+    ui.add_space(10.0);
+
+    // ── Brightness ────────────────────────────────────────────────────────────
+    section(ui, "Brightness — All Lights", |ui| {
+        ui.add(
+            egui::Slider::new(&mut app.pending_brightness, 1_u8..=100).suffix("%"),
+        );
+        if ui.button("Apply to All").clicked() {
+            let pct = app.pending_brightness;
+            app.broadcast(BroadcastAction::Brightness(pct));
+        }
+    });
+
+    ui.add_space(10.0);
+
+    // ── Color ─────────────────────────────────────────────────────────────────
+    section(ui, "Color — All Lights", |ui| {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut app.use_color_temp, false, "RGB");
+            ui.radio_value(&mut app.use_color_temp, true, "White / Color Temp");
+        });
+        ui.add_space(6.0);
+
+        if app.use_color_temp {
+            ui.add(
+                egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000).suffix(" K"),
+            );
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Warm").color(Color32::from_rgb(255, 180, 80)).small());
+                ui.label(RichText::new("\u{2194}").small().color(Color32::GRAY));
+                ui.label(RichText::new("Cool").color(Color32::from_rgb(160, 200, 255)).small());
+            });
+            if ui.button("Apply to All").clicked() {
+                let k = app.pending_color_temp;
+                app.broadcast(BroadcastAction::ColorTemp(k));
+            }
+        } else {
+            egui::color_picker::color_edit_button_rgb(ui, &mut app.pending_color);
+            if ui.button("Apply to All").clicked() {
+                let [r, g, b] = app.pending_color;
+                let color = Color::new(
+                    (r * 255.0).round() as u8,
+                    (g * 255.0).round() as u8,
+                    (b * 255.0).round() as u8,
+                );
+                app.broadcast(BroadcastAction::Color(color));
+            }
+        }
+    });
+
+    ui.add_space(12.0);
+
+    // ── Device summary grid ───────────────────────────────────────────────────
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(RichText::new("Device summary").small().color(Color32::GRAY));
+    ui.add_space(4.0);
+
+    let devices: Vec<_> = app.devices.clone();
+    egui::Grid::new("all_lights_grid")
+        .num_columns(4)
+        .striped(true)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            // Header row
+            ui.label(RichText::new("Device").small().strong());
+            ui.label(RichText::new("Power").small().strong());
+            ui.label(RichText::new("Brightness").small().strong());
+            ui.label(RichText::new("Color").small().strong());
+            ui.end_row();
+
+            for device in &devices {
+                let state = app.states.get(&device.mac);
+
+                ui.label(RichText::new(device.display_name()).small());
+
+                match state.map(|s| s.on) {
+                    Some(true) => ui.label(RichText::new("ON").small().color(Color32::from_rgb(80, 220, 80))),
+                    Some(false) => ui.label(RichText::new("OFF").small().color(Color32::DARK_GRAY)),
+                    None => ui.label(RichText::new("?").small().color(Color32::GOLD)),
+                };
+
+                match state.map(|s| s.brightness) {
+                    Some(b) => ui.label(RichText::new(format!("{b}%")).small()),
+                    None => ui.label(RichText::new("?").small().color(Color32::GOLD)),
+                };
+
+                if let Some(s) = state {
+                    if s.color_temp_kelvin > 0 {
+                        ui.label(RichText::new(format!("{}K", s.color_temp_kelvin)).small());
+                    } else {
+                        let swatch = Color32::from_rgb(s.color.r, s.color.g, s.color.b);
+                        let (rect, _) =
+                            ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                        ui.painter().rect_filled(rect, 2.0, swatch);
+                    }
+                } else {
+                    ui.label(RichText::new("?").small().color(Color32::GOLD));
+                }
+
+                ui.end_row();
+            }
+        });
 }
 
 // ── Rename section ────────────────────────────────────────────────────────────

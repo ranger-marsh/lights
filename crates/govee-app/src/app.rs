@@ -6,7 +6,17 @@ use std::sync::mpsc;
 use govee_core::models::{Color, Device, DeviceState};
 
 use crate::config;
-use crate::worker::{Command, WorkerEvent};
+use crate::worker::{BroadcastAction, Command, WorkerEvent};
+
+// ── Tab selection ─────────────────────────────────────────────────────────────
+
+/// Which top-level tab is active in the central panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Individual,
+    All,
+}
 
 // ── App state ─────────────────────────────────────────────────────────────────
 
@@ -41,6 +51,9 @@ pub struct GoveeApp {
     /// When `true` the color section shows the Kelvin slider; otherwise RGB.
     pub use_color_temp: bool,
 
+    // ── Tab ───────────────────────────────────────────────────────────────────
+    pub tab: Tab,
+
     // ── Channels ─────────────────────────────────────────────────────────────
     pub cmd_tx: mpsc::Sender<Command>,
     pub evt_rx: mpsc::Receiver<WorkerEvent>,
@@ -63,6 +76,7 @@ impl GoveeApp {
             pending_color: [1.0, 1.0, 1.0], // white
             pending_color_temp: 4_000,
             use_color_temp: false,
+            tab: Tab::default(),
             cmd_tx,
             evt_rx,
         }
@@ -184,6 +198,13 @@ impl GoveeApp {
     /// Send a command to the async worker (fire-and-forget).
     pub fn send(&self, cmd: Command) {
         let _ = self.cmd_tx.send(cmd);
+    }
+
+    /// Broadcast an action to all currently known devices.
+    pub fn broadcast(&self, action: BroadcastAction) {
+        if !self.devices.is_empty() {
+            self.send(Command::Broadcast(self.devices.clone(), action));
+        }
     }
 }
 
