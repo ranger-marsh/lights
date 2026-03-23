@@ -436,7 +436,7 @@ fn draw_all_lights(ui: &mut egui::Ui, app: &mut GoveeApp) {
 
     // ── Scenes ────────────────────────────────────────────────────────────────
     let all_devices = app.devices.clone();
-    draw_scene_picker(ui, app, all_devices, "all");
+    draw_scene_picker(ui, app, all_devices);
 
     ui.add_space(12.0);
 
@@ -690,7 +690,7 @@ fn draw_group(ui: &mut egui::Ui, app: &mut GoveeApp, idx: usize) {
 
         // Scenes
         let group_devices = app.group_devices(idx);
-        draw_scene_picker(ui, app, group_devices, &format!("group_{idx}"));
+        draw_scene_picker(ui, app, group_devices);
     }
 
     // ── Delete group ─────────────────────────────────────────────────────────
@@ -763,7 +763,6 @@ fn draw_scene_picker(
     ui: &mut egui::Ui,
     app: &mut GoveeApp,
     devices: Vec<govee_core::models::Device>,
-    salt: &str,
 ) {
     section(ui, "Scenes", |ui| {
         // ── Category selector row ────────────────────────────────────────────
@@ -777,57 +776,57 @@ fn draw_scene_picker(
 
         let cat = &scenes::CATEGORIES[app.selected_scene_cat];
 
-        // ── Scene button grid (scrollable) ───────────────────────────────────
-        egui::ScrollArea::vertical()
-            .id_salt(format!("scene_scroll_{salt}"))
-            .max_height(200.0)
-            .show(ui, |ui| {
-                // 3 buttons per row
-                let scene_count = cat.scenes.len();
-                let mut scene_to_apply: Option<usize> = None;
+        // ── Scene button grid ─────────────────────────────────────────────────
+        // Compute a uniform button width once — before any column layout —
+        // so every button in the row gets exactly the same size.
+        const COLS: usize = 3;
+        const GAP: f32 = 8.0;
+        const BTN_H: f32 = 48.0;
+        let btn_w = (ui.available_width() - (COLS - 1) as f32 * GAP) / COLS as f32;
 
-                egui::Grid::new(format!("scene_grid_{salt}"))
-                    .num_columns(3)
-                    .spacing([8.0, 8.0])
-                    .show(ui, |ui| {
-                        for (i, scene) in cat.scenes.iter().enumerate() {
-                            let btn_resp = ui.add_sized(
-                                [ui.available_width().max(120.0) / (3 - (i % 3)) as f32, 48.0],
-                                egui::Button::new(scene.name),
-                            );
+        let mut scene_to_apply: Option<usize> = None;
 
-                            // Draw colour-palette swatches along the bottom of the button
-                            let rect = btn_resp.rect;
-                            let n_swatches = scene.palette.len().min(6);
-                            let sw = 10.0_f32;
-                            let gap = 3.0_f32;
-                            let total = n_swatches as f32 * sw + (n_swatches - 1) as f32 * gap;
-                            let mut sx = rect.center().x - total / 2.0;
-                            let sy = rect.bottom() - sw - 4.0;
-                            for j in 0..n_swatches {
-                                let (r, g, b) = scene.palette[j];
-                                let swatch = egui::Rect::from_min_size(
-                                    egui::pos2(sx, sy),
-                                    egui::vec2(sw, sw),
-                                );
-                                ui.painter().rect_filled(swatch, 2.0, Color32::from_rgb(r, g, b));
-                                sx += sw + gap;
-                            }
+        for (chunk_idx, chunk) in cat.scenes.chunks(COLS).enumerate() {
+            if chunk_idx > 0 {
+                ui.add_space(GAP);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                for (col, scene) in chunk.iter().enumerate() {
+                    let scene_idx = chunk_idx * COLS + col;
+                    let resp = ui.add_sized(
+                        [btn_w, BTN_H],
+                        egui::Button::new(scene.name),
+                    );
 
-                            if btn_resp.clicked() {
-                                scene_to_apply = Some(i);
-                            }
+                    // Colour-palette swatches painted along the bottom of the button
+                    let rect = resp.rect;
+                    let n = scene.palette.len().min(6);
+                    let sw = 10.0_f32;
+                    let gap = 3.0_f32;
+                    let total = n as f32 * sw + (n.saturating_sub(1)) as f32 * gap;
+                    let mut sx = rect.center().x - total / 2.0;
+                    let sy = rect.bottom() - sw - 4.0;
+                    for j in 0..n {
+                        let (r, g, b) = scene.palette[j];
+                        let swatch = egui::Rect::from_min_size(
+                            egui::pos2(sx, sy),
+                            egui::vec2(sw, sw),
+                        );
+                        ui.painter().rect_filled(swatch, 2.0, Color32::from_rgb(r, g, b));
+                        sx += sw + gap;
+                    }
 
-                            if (i + 1) % 3 == 0 || i + 1 == scene_count {
-                                ui.end_row();
-                            }
-                        }
-                    });
-
-                if let Some(i) = scene_to_apply {
-                    app.apply_scene_to_devices(devices.clone(), &cat.scenes[i]);
+                    if resp.clicked() {
+                        scene_to_apply = Some(scene_idx);
+                    }
                 }
             });
+        }
+
+        if let Some(i) = scene_to_apply {
+            app.apply_scene_to_devices(devices.clone(), &cat.scenes[i]);
+        }
     });
 }
 
