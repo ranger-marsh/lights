@@ -45,6 +45,8 @@ fn main() -> eframe::Result {
             style.spacing.item_spacing = egui::vec2(8.0, 8.0);
             // Fatter slider rail — easier to grab with a finger.
             style.spacing.slider_rail_height = 8.0;
+            // Wide slider track — fills the panel instead of the 100px default.
+            style.spacing.slider_width = 500.0;
             // Slightly larger text throughout.
             {
                 use egui::{FontFamily::Proportional, FontId, TextStyle::*};
