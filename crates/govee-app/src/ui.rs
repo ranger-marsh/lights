@@ -214,7 +214,8 @@ fn draw_individual(ui: &mut egui::Ui, app: &mut GoveeApp) {
 
         // ── Brightness ────────────────────────────────────────────────────
         section(ui, "Brightness", |ui| {
-            ui.add(
+            ui.add_sized(
+                [ui.available_width(), 40.0],
                 egui::Slider::new(&mut app.pending_brightness, 1_u8..=100)
                     .suffix("%"),
             );
@@ -235,7 +236,8 @@ fn draw_individual(ui: &mut egui::Ui, app: &mut GoveeApp) {
             ui.add_space(6.0);
 
             if app.use_color_temp {
-                ui.add(
+                ui.add_sized(
+                    [ui.available_width(), 40.0],
                     egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000)
                         .suffix(" K"),
                 );
@@ -381,7 +383,8 @@ fn draw_all_lights(ui: &mut egui::Ui, app: &mut GoveeApp) {
         ui.add_space(6.0);
 
         if app.use_color_temp {
-            ui.add(
+            ui.add_sized(
+                [ui.available_width(), 40.0],
                 egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000).suffix(" K"),
             );
             ui.horizontal(|ui| {
@@ -619,7 +622,8 @@ fn draw_group(ui: &mut egui::Ui, app: &mut GoveeApp, idx: usize) {
             ui.add_space(6.0);
 
             if app.use_color_temp {
-                ui.add(
+                ui.add_sized(
+                    [ui.available_width(), 40.0],
                     egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000)
                         .suffix(" K"),
                 );
