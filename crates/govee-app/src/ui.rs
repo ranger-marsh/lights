@@ -61,7 +61,7 @@ fn draw_status_bar(ctx: &egui::Context, app: &GoveeApp) {
 fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
     egui::SidePanel::left("device_panel")
         .resizable(false)
-        .min_width(190.0)
+        .exact_width(220.0)
         .show(ctx, |ui| {
             ui.add_space(8.0);
             ui.heading("Devices");
@@ -93,9 +93,16 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
                         };
 
                         ui.horizontal(|ui| {
+                            ui.set_min_height(40.0);
                             ui.label(dot);
                             let name = device.display_name().to_string();
-                            if ui.selectable_label(is_selected, &name).clicked() {
+                            if ui
+                                .add_sized(
+                                    egui::vec2(ui.available_width(), 40.0),
+                                    egui::SelectableLabel::new(is_selected, name),
+                                )
+                                .clicked()
+                            {
                                 app.selected = i;
                             }
                         });
@@ -144,13 +151,18 @@ fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
                 });
             });
         ui.separator();
-        ui.add_space(6.0);
 
-        match app.tab {
-            Tab::All => draw_all_lights(ui, app),
-            Tab::Individual => draw_individual(ui, app),
-            Tab::Group(i) => draw_group(ui, app, i),
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("central_scroll")
+            .show(ui, |ui| {
+                ui.add_space(6.0);
+                match app.tab {
+                    Tab::All => draw_all_lights(ui, app),
+                    Tab::Individual => draw_individual(ui, app),
+                    Tab::Group(i) => draw_group(ui, app, i),
+                }
+                ui.add_space(8.0);
+            });
     });
 }
 
@@ -183,12 +195,15 @@ fn draw_individual(ui: &mut egui::Ui, app: &mut GoveeApp) {
         section(ui, "Power", |ui| {
             let is_on = state.as_ref().map(|s| s.on).unwrap_or(false);
             let (label, color) = if is_on {
-                ("\u{25cf}  ON  (tap to turn off)", Color32::from_rgb(80, 220, 80))
+                ("\u{25cf}  ON  \u{2014} tap to turn off", Color32::from_rgb(80, 220, 80))
             } else {
-                ("\u{25cb}  OFF  (tap to turn on)", Color32::GRAY)
+                ("\u{25cb}  OFF  \u{2014} tap to turn on", Color32::GRAY)
             };
             if ui
-                .button(RichText::new(label).color(color).size(15.0))
+                .add_sized(
+                    egui::vec2(ui.available_width(), 44.0),
+                    egui::Button::new(RichText::new(label).color(color).size(15.0)),
+                )
                 .clicked()
             {
                 app.send(Command::SetPower(device.clone(), !is_on));
@@ -312,16 +327,29 @@ fn draw_all_lights(ui: &mut egui::Ui, app: &mut GoveeApp) {
 
     // ── Power ─────────────────────────────────────────────────────────────────
     section(ui, "Power — All Lights", |ui| {
-        ui.horizontal(|ui| {
-            if ui
-                .button(RichText::new("\u{25cf}  Turn All ON").color(Color32::from_rgb(80, 220, 80)).size(15.0))
+        ui.columns(2, |cols| {
+            if cols[0]
+                .add_sized(
+                    egui::vec2(cols[0].available_width(), 44.0),
+                    egui::Button::new(
+                        RichText::new("\u{25cf}  Turn All ON")
+                            .color(Color32::from_rgb(80, 220, 80))
+                            .size(15.0),
+                    ),
+                )
                 .clicked()
             {
                 app.broadcast(BroadcastAction::Power(true));
             }
-            ui.add_space(8.0);
-            if ui
-                .button(RichText::new("\u{25cb}  Turn All OFF").color(Color32::GRAY).size(15.0))
+            if cols[1]
+                .add_sized(
+                    egui::vec2(cols[1].available_width(), 44.0),
+                    egui::Button::new(
+                        RichText::new("\u{25cb}  Turn All OFF")
+                            .color(Color32::GRAY)
+                            .size(15.0),
+                    ),
+                )
                 .clicked()
             {
                 app.broadcast(BroadcastAction::Power(false));
@@ -482,32 +510,48 @@ fn draw_group(ui: &mut egui::Ui, app: &mut GoveeApp, idx: usize) {
 
     ui.add_space(10.0);
 
-    // ── Member checkboxes ─────────────────────────────────────────────────────
-    section(ui, "Members", |ui| {
-        let devices: Vec<_> = app.devices.clone();
-        if devices.is_empty() {
-            ui.label(
-                RichText::new("No devices discovered yet.")
-                    .small()
-                    .color(Color32::GRAY),
-            );
-        } else {
-            let macs = app.groups[idx].macs.clone();
-            let mut to_toggle: Option<String> = None;
-            for device in &devices {
-                let mut checked = macs.contains(&device.mac);
-                if ui
-                    .checkbox(&mut checked, device.display_name())
-                    .changed()
-                {
-                    to_toggle = Some(device.mac.clone());
+    // ── Member checkboxes (collapsible) ───────────────────────────────────────
+    let total = app.devices.len();
+    let in_group = app.groups[idx].macs.len();
+    let header = if total == 0 {
+        "Members".to_string()
+    } else {
+        format!("Members  ({in_group} / {total})")
+    };
+
+    egui::CollapsingHeader::new(header)
+        .id_salt(format!("members_{idx}"))
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add_space(4.0);
+            let devices: Vec<_> = app.devices.clone();
+            if devices.is_empty() {
+                ui.label(
+                    RichText::new("No devices discovered yet.")
+                        .small()
+                        .color(Color32::GRAY),
+                );
+            } else {
+                let macs = app.groups[idx].macs.clone();
+                let mut to_toggle: Option<String> = None;
+                for device in &devices {
+                    let mut checked = macs.contains(&device.mac);
+                    if ui
+                        .add_sized(
+                            egui::vec2(ui.available_width(), 36.0),
+                            egui::Checkbox::new(&mut checked, device.display_name()),
+                        )
+                        .changed()
+                    {
+                        to_toggle = Some(device.mac.clone());
+                    }
+                }
+                if let Some(mac) = to_toggle {
+                    app.toggle_device_in_group(idx, &mac);
                 }
             }
-            if let Some(mac) = to_toggle {
-                app.toggle_device_in_group(idx, &mac);
-            }
-        }
-    });
+            ui.add_space(4.0);
+        });
 
     ui.add_space(10.0);
 
@@ -521,23 +565,28 @@ fn draw_group(ui: &mut egui::Ui, app: &mut GoveeApp, idx: usize) {
     } else {
         // Power
         section(ui, "Power", |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button(
-                        RichText::new("\u{25cf}  Turn ON")
-                            .color(Color32::from_rgb(80, 220, 80))
-                            .size(15.0),
+            ui.columns(2, |cols| {
+                if cols[0]
+                    .add_sized(
+                        egui::vec2(cols[0].available_width(), 44.0),
+                        egui::Button::new(
+                            RichText::new("\u{25cf}  Turn ON")
+                                .color(Color32::from_rgb(80, 220, 80))
+                                .size(15.0),
+                        ),
                     )
                     .clicked()
                 {
                     app.broadcast_group(idx, BroadcastAction::Power(true));
                 }
-                ui.add_space(8.0);
-                if ui
-                    .button(
-                        RichText::new("\u{25cb}  Turn OFF")
-                            .color(Color32::GRAY)
-                            .size(15.0),
+                if cols[1]
+                    .add_sized(
+                        egui::vec2(cols[1].available_width(), 44.0),
+                        egui::Button::new(
+                            RichText::new("\u{25cb}  Turn OFF")
+                                .color(Color32::GRAY)
+                                .size(15.0),
+                        ),
                     )
                     .clicked()
                 {

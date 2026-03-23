@@ -25,8 +25,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Govee Lights")
-            .with_inner_size([680.0, 460.0])
-            .with_min_inner_size([480.0, 340.0]),
+            .with_inner_size([800.0, 480.0])
+            .with_min_inner_size([800.0, 480.0]),
         ..Default::default()
     };
 
@@ -34,6 +34,31 @@ fn main() -> eframe::Result {
         "Govee Lights",
         options,
         Box::new(|cc| {
+            // ── Touch-friendly style for 800×480 ─────────────────────────────
+            let mut style = (*cc.egui_ctx.style()).clone();
+
+            // Minimum interactive height — comfortable finger tap target.
+            style.spacing.interact_size = egui::vec2(44.0, 40.0);
+            // More padding inside buttons so they feel substantial.
+            style.spacing.button_padding = egui::vec2(14.0, 8.0);
+            // A bit more breathing room between widgets.
+            style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+            // Fatter slider rail — easier to grab with a finger.
+            style.spacing.slider_rail_height = 8.0;
+            // Slightly larger text throughout.
+            {
+                use egui::{FontFamily::Proportional, FontId, TextStyle::*};
+                style.text_styles = [
+                    (Small,    FontId::new(12.0, Proportional)),
+                    (Body,     FontId::new(15.0, Proportional)),
+                    (Monospace, FontId::new(14.0, egui::FontFamily::Monospace)),
+                    (Button,   FontId::new(15.0, Proportional)),
+                    (Heading,  FontId::new(20.0, Proportional)),
+                ]
+                .into();
+            }
+            cc.egui_ctx.set_style(style);
+
             let (cmd_tx, cmd_rx) = mpsc::channel();
             let (evt_tx, evt_rx) = mpsc::channel();
 
