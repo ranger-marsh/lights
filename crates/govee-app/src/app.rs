@@ -1,6 +1,6 @@
 //! Application state and [`eframe::App`] implementation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 
 use govee_core::models::{Color, Device, DeviceState};
@@ -57,6 +57,10 @@ pub struct GoveeApp {
     /// Text buffer for the rename input field.
     pub rename_buf: String,
 
+    // ── Connectivity ─────────────────────────────────────────────────────────
+    /// MACs of devices currently in the reconnect backoff (offline).
+    pub offline_macs: HashSet<String>,
+
     // ── Status bar ───────────────────────────────────────────────────────────
     pub status: String,
     pub status_is_error: bool,
@@ -88,6 +92,7 @@ impl GoveeApp {
             states: HashMap::new(),
             selected: 0,
             names: config::load(),
+            offline_macs: HashSet::new(),
             groups: config::load_groups(),
             renaming_group: None,
             group_rename_buf: String::new(),
@@ -289,6 +294,12 @@ impl GoveeApp {
                         }
                     }
                     self.devices = devices;
+                }
+                WorkerEvent::DeviceOffline(mac) => {
+                    self.offline_macs.insert(mac);
+                }
+                WorkerEvent::DeviceOnline(mac) => {
+                    self.offline_macs.remove(&mac);
                 }
                 WorkerEvent::StateUpdated { mac, state } => {
                     // Mirror real device state into the pending controls.

@@ -4,9 +4,15 @@
 //! against the LAN client and sends [`WorkerEvent`]s back.  Because egui only
 //! repaints on user interaction, the worker also calls [`egui::Context::request_repaint`]
 //! every time it pushes an event so the UI updates immediately.
+//!
+//! # Reconnect behaviour
+//! When a device fails a state refresh it is added to an offline table.
+//! The worker retries it in the background using a stepped backoff:
+//! 5 s → 10 s → 30 s → 60 s (stays at 60 s until it responds).
 
+use std::collections::HashMap;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use govee_core::{
     lan::LanClient,
@@ -20,8 +26,22 @@ use tracing::warn;
 const STATE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How long to wait after sending a control command before querying state.
-/// Gives the device time to apply the change before we read it back.
 const POST_COMMAND_DELAY: Duration = Duration::from_millis(400);
+
+/// Stepped backoff intervals (seconds): 5 → 10 → 30 → 60.
+const BACKOFF_SECS: [u64; 4] = [5, 10, 30, 60];
+
+fn backoff(retry_count: u32) -> Duration {
+    Duration::from_secs(BACKOFF_SECS[retry_count.min(3) as usize])
+}
+
+// ── Offline tracking ──────────────────────────────────────────────────────────
+
+struct OfflineEntry {
+    device: Device,
+    retry_count: u32,
+    next_retry: Instant,
+}
 
 // ── Public channel types ──────────────────────────────────────────────────────
 
@@ -33,6 +53,8 @@ pub enum Command {
     SetColor(Device, Color),
     SetColorTemp(Device, u16),
     RefreshState(Device),
+    /// Refresh the state of every known device at once.
+    RefreshAll,
     Rediscover,
     /// Send the same action to every device in the list, then refresh each.
     Broadcast(Vec<Device>, BroadcastAction),
@@ -52,6 +74,10 @@ pub enum BroadcastAction {
 pub enum WorkerEvent {
     Discovered(Vec<Device>),
     StateUpdated { mac: String, state: DeviceState },
+    /// A device failed a state refresh and has entered the reconnect backoff.
+    DeviceOffline(String),
+    /// A device that was offline has successfully responded again.
+    DeviceOnline(String),
     Status(String),
     Error(String),
 }
@@ -59,8 +85,6 @@ pub enum WorkerEvent {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 /// Spawn the background worker on a dedicated OS thread with its own Tokio runtime.
-///
-/// `ctx` is used to wake egui whenever a new event arrives.
 pub fn spawn(
     cmd_rx: mpsc::Receiver<Command>,
     evt_tx: mpsc::Sender<WorkerEvent>,
@@ -80,7 +104,6 @@ async fn run(
     evt_tx: mpsc::Sender<WorkerEvent>,
     ctx: egui::Context,
 ) {
-    // Helper: send an event and wake the GUI.
     let send = |evt: WorkerEvent| {
         let _ = evt_tx.send(evt);
         ctx.request_repaint();
@@ -94,14 +117,22 @@ async fn run(
         }
     };
 
-    // Discover devices at startup, then immediately refresh all their states.
-    discover(&lan, &send).await;
+    // All devices ever discovered this session — used for RefreshAll and
+    // as the source of truth for offline reconnect attempts.
+    let mut known: Vec<Device> = Vec::new();
+    // Devices that failed a state refresh, keyed by MAC.
+    let mut offline: HashMap<String, OfflineEntry> = HashMap::new();
 
-    // Poll for commands. Using try_recv + a short sleep keeps the async
-    // executor free for LAN I/O without burning CPU.
+    discover(&lan, &send, &mut known, &mut offline).await;
+
     loop {
+        // Retry any offline devices whose backoff timer has expired.
+        if offline.values().any(|e| e.next_retry <= Instant::now()) {
+            retry_offline(&lan, &send, &mut offline).await;
+        }
+
         match cmd_rx.try_recv() {
-            Ok(cmd) => handle_command(&lan, &send, cmd).await,
+            Ok(cmd) => handle_command(&lan, &send, cmd, &mut known, &mut offline).await,
             Err(mpsc::TryRecvError::Empty) => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -110,8 +141,16 @@ async fn run(
     }
 }
 
-/// Discover all devices, then refresh the state of every found device.
-async fn discover(lan: &LanClient, send: &impl Fn(WorkerEvent)) {
+// ── Discovery ────────────────────────────────────────────────────────────────
+
+/// Discover all devices, refresh their state, and populate the offline map
+/// for any that don't respond.
+async fn discover(
+    lan: &LanClient,
+    send: &impl Fn(WorkerEvent),
+    known: &mut Vec<Device>,
+    offline: &mut HashMap<String, OfflineEntry>,
+) {
     send(WorkerEvent::Status("Discovering devices\u{2026}".into()));
 
     match lan.discover(Duration::from_secs(3)).await {
@@ -130,13 +169,17 @@ async fn discover(lan: &LanClient, send: &impl Fn(WorkerEvent)) {
                 "Found {count} device(s). Refreshing state\u{2026}"
             )));
 
-            // Refresh each device sequentially — the socket is shared, so
-            // doing them one at a time avoids mixing up responses.
-            for device in &devices {
-                refresh_device(lan, send, device).await;
+            // Fresh discovery clears stale offline entries for rediscovered devices.
+            for d in &devices {
+                offline.remove(&d.mac);
             }
 
-            send(WorkerEvent::Status(format!("Ready — {count} device(s).")));
+            for device in &devices {
+                try_refresh(lan, send, device, offline).await;
+            }
+
+            *known = devices;
+            send(WorkerEvent::Status(format!("Ready \u{2014} {count} device(s).")));
         }
         Err(e) => {
             warn!("Discovery error: {e}");
@@ -146,24 +189,111 @@ async fn discover(lan: &LanClient, send: &impl Fn(WorkerEvent)) {
     }
 }
 
-/// Query a single device's state and send a [`WorkerEvent::StateUpdated`].
-async fn refresh_device(lan: &LanClient, send: &impl Fn(WorkerEvent), device: &Device) {
-    match lan.get_state(device, STATE_TIMEOUT).await {
-        Ok(state) => send(WorkerEvent::StateUpdated {
-            mac: device.mac.clone(),
-            state,
-        }),
-        Err(e) => {
-            warn!("State refresh failed for {}: {e}", device.display_name());
-            send(WorkerEvent::Error(format!(
-                "Refresh error ({}): {e}",
-                device.display_name()
-            )));
+// ── Offline retry ─────────────────────────────────────────────────────────────
+
+/// Attempt to refresh every offline device whose backoff timer has expired.
+async fn retry_offline(
+    lan: &LanClient,
+    send: &impl Fn(WorkerEvent),
+    offline: &mut HashMap<String, OfflineEntry>,
+) {
+    let now = Instant::now();
+    let due: Vec<String> = offline
+        .iter()
+        .filter(|(_, e)| e.next_retry <= now)
+        .map(|(mac, _)| mac.clone())
+        .collect();
+
+    for mac in due {
+        let (device, retry_count) = match offline.get(&mac) {
+            Some(e) => (e.device.clone(), e.retry_count),
+            None => continue,
+        };
+
+        match lan.get_state(&device, STATE_TIMEOUT).await {
+            Ok(state) => {
+                offline.remove(&mac);
+                send(WorkerEvent::DeviceOnline(mac.clone()));
+                send(WorkerEvent::StateUpdated { mac, state });
+                send(WorkerEvent::Status(format!(
+                    "{} reconnected.",
+                    device.display_name()
+                )));
+            }
+            Err(_) => {
+                if let Some(e) = offline.get_mut(&mac) {
+                    e.retry_count = retry_count + 1;
+                    e.next_retry = Instant::now() + backoff(retry_count + 1);
+                }
+            }
         }
     }
 }
 
-async fn handle_command(lan: &LanClient, send: &impl Fn(WorkerEvent), cmd: Command) {
+// ── State refresh ─────────────────────────────────────────────────────────────
+
+/// Query a device's state. On success sends [`WorkerEvent::StateUpdated`] and
+/// removes the device from the offline map. On failure, adds it to the offline
+/// map (or updates its backoff if already there) and sends [`WorkerEvent::DeviceOffline`].
+async fn try_refresh(
+    lan: &LanClient,
+    send: &impl Fn(WorkerEvent),
+    device: &Device,
+    offline: &mut HashMap<String, OfflineEntry>,
+) {
+    match lan.get_state(device, STATE_TIMEOUT).await {
+        Ok(state) => {
+            // If it was previously offline, announce reconnection.
+            if offline.remove(&device.mac).is_some() {
+                send(WorkerEvent::DeviceOnline(device.mac.clone()));
+            }
+            send(WorkerEvent::StateUpdated {
+                mac: device.mac.clone(),
+                state,
+            });
+        }
+        Err(e) => {
+            warn!("State refresh failed for {}: {e}", device.display_name());
+            let already_tracked = offline.contains_key(&device.mac);
+            offline
+                .entry(device.mac.clone())
+                .or_insert_with(|| OfflineEntry {
+                    device: device.clone(),
+                    retry_count: 0,
+                    next_retry: Instant::now() + backoff(0),
+                });
+            // Only fire the event the first time a device goes offline.
+            if !already_tracked {
+                send(WorkerEvent::DeviceOffline(device.mac.clone()));
+                send(WorkerEvent::Error(format!(
+                    "{} is offline \u{2014} retrying\u{2026}",
+                    device.display_name()
+                )));
+            }
+        }
+    }
+}
+
+/// Wait briefly after a control command, then refresh state.
+async fn post_command_refresh(
+    lan: &LanClient,
+    send: &impl Fn(WorkerEvent),
+    device: &Device,
+    offline: &mut HashMap<String, OfflineEntry>,
+) {
+    tokio::time::sleep(POST_COMMAND_DELAY).await;
+    try_refresh(lan, send, device, offline).await;
+}
+
+// ── Command handling ──────────────────────────────────────────────────────────
+
+async fn handle_command(
+    lan: &LanClient,
+    send: &impl Fn(WorkerEvent),
+    cmd: Command,
+    known: &mut Vec<Device>,
+    offline: &mut HashMap<String, OfflineEntry>,
+) {
     match cmd {
         Command::SetPower(device, on) => {
             match lan.set_power(&device, on).await {
@@ -177,7 +307,7 @@ async fn handle_command(lan: &LanClient, send: &impl Fn(WorkerEvent), cmd: Comma
                     return;
                 }
             }
-            post_command_refresh(lan, send, &device).await;
+            post_command_refresh(lan, send, &device, offline).await;
         }
 
         Command::SetBrightness(device, pct) => {
@@ -192,7 +322,7 @@ async fn handle_command(lan: &LanClient, send: &impl Fn(WorkerEvent), cmd: Comma
                     return;
                 }
             }
-            post_command_refresh(lan, send, &device).await;
+            post_command_refresh(lan, send, &device, offline).await;
         }
 
         Command::SetColor(device, color) => {
@@ -207,7 +337,7 @@ async fn handle_command(lan: &LanClient, send: &impl Fn(WorkerEvent), cmd: Comma
                     return;
                 }
             }
-            post_command_refresh(lan, send, &device).await;
+            post_command_refresh(lan, send, &device, offline).await;
         }
 
         Command::SetColorTemp(device, k) => {
@@ -222,32 +352,58 @@ async fn handle_command(lan: &LanClient, send: &impl Fn(WorkerEvent), cmd: Comma
                     return;
                 }
             }
-            post_command_refresh(lan, send, &device).await;
+            post_command_refresh(lan, send, &device, offline).await;
         }
 
         Command::RefreshState(device) => {
-            refresh_device(lan, send, &device).await;
+            try_refresh(lan, send, &device, offline).await;
+            if !offline.contains_key(&device.mac) {
+                send(WorkerEvent::Status(format!(
+                    "{} state refreshed.",
+                    device.display_name()
+                )));
+            }
+        }
+
+        Command::RefreshAll => {
+            if known.is_empty() {
+                send(WorkerEvent::Status("No devices to refresh.".into()));
+                return;
+            }
+            let count = known.len();
             send(WorkerEvent::Status(format!(
-                "{} state refreshed.",
-                device.display_name()
+                "Refreshing {count} device(s)\u{2026}"
+            )));
+            let snapshot = known.clone();
+            for device in &snapshot {
+                try_refresh(lan, send, device, offline).await;
+            }
+            let online = count - offline.len();
+            send(WorkerEvent::Status(format!(
+                "Refreshed \u{2014} {online}/{count} online."
             )));
         }
 
-        Command::Rediscover => discover(lan, send).await,
+        Command::Rediscover => {
+            offline.clear();
+            discover(lan, send, known, offline).await;
+        }
 
         Command::Broadcast(devices, action) => {
             let label = match &action {
                 BroadcastAction::Power(on) => {
-                    format!("Turning all lights {}…", if *on { "ON" } else { "OFF" })
+                    format!("Turning all lights {}\u{2026}", if *on { "ON" } else { "OFF" })
                 }
-                BroadcastAction::Brightness(pct) => format!("Setting all brightness → {pct}%…"),
-                BroadcastAction::Color(c) => format!("Setting all color → {c}…"),
-                BroadcastAction::ColorTemp(k) => format!("Setting all color temp → {k}K…"),
+                BroadcastAction::Brightness(pct) => {
+                    format!("Setting all brightness \u{2192} {pct}%\u{2026}")
+                }
+                BroadcastAction::Color(c) => format!("Setting all color \u{2192} {c}\u{2026}"),
+                BroadcastAction::ColorTemp(k) => {
+                    format!("Setting all color temp \u{2192} {k}K\u{2026}")
+                }
             };
             send(WorkerEvent::Status(label));
 
-            // Send the command to every device, ignoring per-device errors so
-            // one unresponsive light doesn't block the rest.
             for device in &devices {
                 let result = match &action {
                     BroadcastAction::Power(on) => lan.set_power(device, *on).await,
@@ -261,18 +417,11 @@ async fn handle_command(lan: &LanClient, send: &impl Fn(WorkerEvent), cmd: Comma
                 }
             }
 
-            // Wait for all devices to apply the change, then refresh each.
             tokio::time::sleep(POST_COMMAND_DELAY).await;
             for device in &devices {
-                refresh_device(lan, send, device).await;
+                try_refresh(lan, send, device, offline).await;
             }
             send(WorkerEvent::Status("All lights updated.".into()));
         }
     }
-}
-
-/// Wait briefly for the device to apply a command, then read its state back.
-async fn post_command_refresh(lan: &LanClient, send: &impl Fn(WorkerEvent), device: &Device) {
-    tokio::time::sleep(POST_COMMAND_DELAY).await;
-    refresh_device(lan, send, device).await;
 }

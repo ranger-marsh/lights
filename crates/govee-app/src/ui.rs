@@ -86,10 +86,15 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
                         let is_on = state.map(|s| s.on);
                         let is_selected = i == app.selected;
 
-                        let dot = match is_on {
-                            Some(true) => RichText::new("\u{25cf}").color(Color32::from_rgb(80, 220, 80)),
-                            Some(false) => RichText::new("\u{25cb}").color(Color32::DARK_GRAY),
-                            None => RichText::new("\u{25cc}").color(Color32::GOLD),
+                        let is_offline = app.offline_macs.contains(&device.mac);
+                        let dot = if is_offline {
+                            RichText::new("\u{2715}").color(Color32::from_rgb(220, 60, 60))
+                        } else {
+                            match is_on {
+                                Some(true) => RichText::new("\u{25cf}").color(Color32::from_rgb(80, 220, 80)),
+                                Some(false) => RichText::new("\u{25cb}").color(Color32::DARK_GRAY),
+                                None => RichText::new("\u{25cc}").color(Color32::GOLD),
+                            }
                         };
 
                         ui.horizontal(|ui| {
@@ -112,8 +117,24 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
 
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.add_space(6.0);
-                if ui.button("\u{1f50d}  Scan again").clicked() {
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 40.0],
+                        egui::Button::new("\u{1f50d}  Scan again"),
+                    )
+                    .clicked()
+                {
                     app.send(Command::Rediscover);
+                }
+                ui.add_space(4.0);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 40.0],
+                        egui::Button::new("\u{21ba}  Refresh All"),
+                    )
+                    .clicked()
+                {
+                    app.send(Command::RefreshAll);
                 }
                 ui.add_space(4.0);
                 ui.separator();
