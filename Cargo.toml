@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/govee-core",
+    "crates/govee-app",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Air-gapped: network is not connected to the internet.
+# The LAN (UDP) API is the only control path. The HTTP cloud API is compiled
+# out by default — enable the `http-api` feature only if internet access is
+# available and you want cloud-based fallback control.
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1

@@ -1,0 +1,21 @@
+[package]
+name = "govee-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for Govee lights control (LAN UDP — air-gapped safe)"
+
+[features]
+# Enable the cloud HTTP API. Off by default; requires internet access.
+http-api = ["dep:reqwest"]
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true, optional = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+anyhow = "1"
