@@ -209,8 +209,15 @@ fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
             });
         ui.separator();
 
+        // Each tab gets its own scroll ID so positions are independent and
+        // the tab bar buttons sit entirely outside any scroll area.
+        let scroll_id = match app.tab {
+            Tab::All => egui::Id::new("scroll_all"),
+            Tab::Individual => egui::Id::new("scroll_individual"),
+            Tab::Group(i) => egui::Id::new(("scroll_group", i)),
+        };
         egui::ScrollArea::vertical()
-            .id_salt("central_scroll")
+            .id_salt(scroll_id)
             .drag_to_scroll(true)
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
