@@ -311,6 +311,9 @@ impl GoveeApp {
             match evt {
                 WorkerEvent::Discovered(mut devices) => {
                     self.selected = 0;
+                    // Fresh discovery — reset offline state so icons aren't
+                    // stuck red from a previous session or scan.
+                    self.offline_macs.clear();
                     // Apply any stored name overrides before handing to the UI.
                     for device in &mut devices {
                         if let Some(name) = self.names.get(&device.mac) {
@@ -326,6 +329,12 @@ impl GoveeApp {
                     self.offline_macs.remove(&mac);
                 }
                 WorkerEvent::StateUpdated { mac, state } => {
+                    // A successful state fetch is proof the device is reachable —
+                    // clear any stale offline flag regardless of how it arrived.
+                    // This fixes cases where DeviceOnline was never sent (e.g.
+                    // after Rediscover clears the worker's offline map before
+                    // try_refresh runs).
+                    self.offline_macs.remove(&mac);
                     // Mirror real device state into the pending controls.
                     self.pending_brightness = state.brightness;
                     if state.color_temp_kelvin > 0 {
