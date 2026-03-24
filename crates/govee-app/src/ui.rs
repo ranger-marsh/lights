@@ -66,7 +66,28 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
         .show(ctx, |ui| {
             ui.add_space(8.0);
             ui.heading("Devices");
-            ui.add_space(6.0);
+            ui.add_space(3.0);
+
+            // Connected count: named devices that are discovered and not offline.
+            let total_known = app.names.len();
+            if total_known > 0 {
+                let connected = app.devices.iter()
+                    .filter(|d| app.names.contains_key(&d.mac)
+                        && !app.offline_macs.contains(&d.mac))
+                    .count();
+                let color = if connected == total_known {
+                    Color32::from_rgb(80, 200, 80)
+                } else {
+                    Color32::from_rgb(220, 170, 50)
+                };
+                ui.label(
+                    RichText::new(format!("{connected} / {total_known} connected"))
+                        .small()
+                        .color(color),
+                );
+            }
+
+            ui.add_space(4.0);
             ui.separator();
             ui.add_space(6.0);
 
