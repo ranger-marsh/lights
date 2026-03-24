@@ -118,6 +118,11 @@ fn main() -> eframe::Result {
             style.spacing.slider_rail_height = 8.0;
             // Wide slider track — fills the panel instead of the 100px default.
             style.spacing.slider_width = 500.0;
+            // Touch-friendly scrollbar: wide, always visible, not floating.
+            style.spacing.scroll.bar_width = 20.0;
+            style.spacing.scroll.floating = false;
+            style.spacing.scroll.bar_inner_margin = 4.0;
+            style.spacing.scroll.bar_outer_margin = 2.0;
             // Slightly larger text throughout.
             {
                 use egui::{FontFamily::Proportional, FontId, TextStyle::*};
