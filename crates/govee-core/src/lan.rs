@@ -279,7 +279,9 @@ impl LanClient {
             Command::SetColorTemp(k) => serde_json::to_vec(&LanMessage::new(
                 "colorwc",
                 ColorwcData {
-                    color: ColorPayload { r: 0, g: 0, b: 0 },
+                    // Must be white, not black — some devices (e.g. H60C1 pendant)
+                    // interpret {r:0,g:0,b:0} as "no color" and ignore the command.
+                    color: ColorPayload { r: 255, g: 255, b: 255 },
                     color_temp_in_kelvin: k,
                 },
             ))?,
@@ -327,7 +329,7 @@ mod tests {
             Command::SetColorTemp(k) => serde_json::to_vec(&LanMessage::new(
                 "colorwc",
                 ColorwcData {
-                    color: ColorPayload { r: 0, g: 0, b: 0 },
+                    color: ColorPayload { r: 255, g: 255, b: 255 },
                     color_temp_in_kelvin: k,
                 },
             ))
@@ -374,6 +376,10 @@ mod tests {
         let v = decode(&encode(Command::SetColorTemp(4000)));
         assert_eq!(v["msg"]["cmd"], "colorwc");
         assert_eq!(v["msg"]["data"]["colorTemInKelvin"], 4000);
+        // Color must be white so devices like the H60C1 pendant enter temp mode.
+        assert_eq!(v["msg"]["data"]["color"]["r"], 255);
+        assert_eq!(v["msg"]["data"]["color"]["g"], 255);
+        assert_eq!(v["msg"]["data"]["color"]["b"], 255);
     }
 
     #[test]
