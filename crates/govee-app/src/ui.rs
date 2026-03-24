@@ -133,6 +133,8 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
                     } else {
                         egui::ScrollArea::vertical()
                             .auto_shrink([false; 2])
+                            .drag_to_scroll(true)
+                            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                             .show(ui, |ui| {
                                 let count = app.devices.len();
                                 for i in 0..count {
@@ -181,6 +183,8 @@ fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
         // Tab bar — horizontal scroll in case many groups are present
         egui::ScrollArea::horizontal()
             .id_salt("tab_bar")
+            .drag_to_scroll(true)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut app.tab, Tab::All, "All Lights");
@@ -207,6 +211,8 @@ fn draw_controls(ctx: &egui::Context, app: &mut GoveeApp) {
 
         egui::ScrollArea::vertical()
             .id_salt("central_scroll")
+            .drag_to_scroll(true)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(ui, |ui| {
                 ui.add_space(6.0);
                 match app.tab {
