@@ -293,9 +293,13 @@ impl LanClient {
             Command::SetColorTemp(k) => serde_json::to_vec(&LanMessage::new(
                 "colorwc",
                 ColorwcData {
-                    // Must be white, not black — some devices (e.g. H60C1 pendant)
-                    // interpret {r:0,g:0,b:0} as "no color" and ignore the command.
-                    color: ColorPayload { r: 255, g: 255, b: 255 },
+                    // Must be black, not white.  Sending {r:255,g:255,b:255}
+                    // alongside a Kelvin value causes the H60C1 pendant (and
+                    // similar devices) to mix the white RGB with the temperature,
+                    // making warm Kelvin values appear as cool white or go dark.
+                    // Black signals "colour temperature only — ignore RGB".
+                    // (govee2mqtt uses the same convention.)
+                    color: ColorPayload { r: 0, g: 0, b: 0 },
                     color_temp_in_kelvin: k,
                 },
             ))?,
@@ -353,7 +357,7 @@ mod tests {
             Command::SetColorTemp(k) => serde_json::to_vec(&LanMessage::new(
                 "colorwc",
                 ColorwcData {
-                    color: ColorPayload { r: 255, g: 255, b: 255 },
+                    color: ColorPayload { r: 0, g: 0, b: 0 },
                     color_temp_in_kelvin: k,
                 },
             ))
@@ -420,10 +424,12 @@ mod tests {
         let v = decode(&encode(Command::SetColorTemp(4000)));
         assert_eq!(v["msg"]["cmd"], "colorwc");
         assert_eq!(v["msg"]["data"]["colorTemInKelvin"], 4000);
-        // Color must be white so devices like the H60C1 pendant enter temp mode.
-        assert_eq!(v["msg"]["data"]["color"]["r"], 255);
-        assert_eq!(v["msg"]["data"]["color"]["g"], 255);
-        assert_eq!(v["msg"]["data"]["color"]["b"], 255);
+        // Color MUST be black (0,0,0) — not white — so the device uses only
+        // the Kelvin value.  Sending white alongside a warm Kelvin causes the
+        // H60C1 pendant to mix modes and go dark.  (govee2mqtt uses same convention.)
+        assert_eq!(v["msg"]["data"]["color"]["r"], 0);
+        assert_eq!(v["msg"]["data"]["color"]["g"], 0);
+        assert_eq!(v["msg"]["data"]["color"]["b"], 0);
     }
 
     #[test]
