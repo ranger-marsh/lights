@@ -187,13 +187,26 @@ impl LanClient {
     }
 
     /// Send a command to a device via the LAN API.
+    ///
+    /// Each command is sent from a **fresh ephemeral socket** (OS-assigned port),
+    /// not the shared listener socket on port 4002.  This matches the approach
+    /// used by govee2mqtt and is required for some devices (notably the H60C1
+    /// pendant) to correctly handle `colorwc` temperature commands — the H60C1
+    /// ignores or mishandles `colorwc` when it arrives from port 4002.
     pub async fn send_command(&self, device: &Device, command: Command) -> Result<()> {
         let ip = device.ip.ok_or_else(|| {
             GoveeError::DeviceNotFound(format!("device {} has no IP address", device.mac))
         })?;
 
         let payload = self.encode_command(command)?;
-        self.socket
+
+        // Bind an ephemeral socket (port 0 = OS picks a free port).
+        let cmd_sock = UdpSocket::bind(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            0,
+        ))
+        .await?;
+        cmd_sock
             .send_to(&payload, SocketAddr::new(ip, CONTROL_PORT))
             .await?;
         Ok(())
