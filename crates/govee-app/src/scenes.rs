@@ -185,8 +185,9 @@ pub static RELAX: &[Scene] = &[
     },
     Scene {
         name: "Sleep",
-        brightness: 15,
-        palette: &[(200, 10, 10), (180, 8, 8)],
+        // Raised from 15 → 20 and boosted green slightly so pendant stays on.
+        brightness: 20,
+        palette: &[(200, 15, 10), (180, 12, 8)],
     },
     Scene {
         name: "Reading",
@@ -270,8 +271,9 @@ pub static COSMIC: &[Scene] = &[
     },
     Scene {
         name: "Black Hole",
-        brightness: 12,
-        palette: &[(30, 0, 60), (60, 0, 80), (20, 0, 40)],
+        // Raised from 12 → 20: pendant lights cut power below ~15% effective output.
+        brightness: 20,
+        palette: &[(40, 0, 80), (70, 0, 100), (30, 0, 60)],
     },
     Scene {
         name: "Comet",

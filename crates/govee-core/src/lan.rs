@@ -265,17 +265,31 @@ impl LanClient {
             Command::SetBrightness(v) => {
                 serde_json::to_vec(&LanMessage::new("brightness", BrightnessData { value: v }))?
             }
-            Command::SetColor(c) => serde_json::to_vec(&LanMessage::new(
-                "colorwc",
-                ColorwcData {
-                    color: ColorPayload {
-                        r: c.r,
-                        g: c.g,
-                        b: c.b,
+            Command::SetColor(c) => {
+                // Guard against near-black colours.  Some devices (e.g. H60C1
+                // pendant) treat any channel combination whose brightest value
+                // is below ~10 the same as {0,0,0} and cut power entirely.
+                // Scale up while preserving hue so the colour is still correct.
+                const MIN_PEAK: u8 = 10;
+                let peak = c.r.max(c.g).max(c.b);
+                let (r, g, b) = if peak > 0 && peak < MIN_PEAK {
+                    let s = MIN_PEAK as f32 / peak as f32;
+                    (
+                        (c.r as f32 * s).min(255.0) as u8,
+                        (c.g as f32 * s).min(255.0) as u8,
+                        (c.b as f32 * s).min(255.0) as u8,
+                    )
+                } else {
+                    (c.r, c.g, c.b)
+                };
+                serde_json::to_vec(&LanMessage::new(
+                    "colorwc",
+                    ColorwcData {
+                        color: ColorPayload { r, g, b },
+                        color_temp_in_kelvin: 0,
                     },
-                    color_temp_in_kelvin: 0,
-                },
-            ))?,
+                ))?
+            }
             Command::SetColorTemp(k) => serde_json::to_vec(&LanMessage::new(
                 "colorwc",
                 ColorwcData {
@@ -314,18 +328,28 @@ mod tests {
                 serde_json::to_vec(&LanMessage::new("brightness", BrightnessData { value: v }))
                     .unwrap()
             }
-            Command::SetColor(c) => serde_json::to_vec(&LanMessage::new(
-                "colorwc",
-                ColorwcData {
-                    color: ColorPayload {
-                        r: c.r,
-                        g: c.g,
-                        b: c.b,
+            Command::SetColor(c) => {
+                const MIN_PEAK: u8 = 10;
+                let peak = c.r.max(c.g).max(c.b);
+                let (r, g, b) = if peak > 0 && peak < MIN_PEAK {
+                    let s = MIN_PEAK as f32 / peak as f32;
+                    (
+                        (c.r as f32 * s).min(255.0) as u8,
+                        (c.g as f32 * s).min(255.0) as u8,
+                        (c.b as f32 * s).min(255.0) as u8,
+                    )
+                } else {
+                    (c.r, c.g, c.b)
+                };
+                serde_json::to_vec(&LanMessage::new(
+                    "colorwc",
+                    ColorwcData {
+                        color: ColorPayload { r, g, b },
+                        color_temp_in_kelvin: 0,
                     },
-                    color_temp_in_kelvin: 0,
-                },
-            ))
-            .unwrap(),
+                ))
+                .unwrap()
+            }
             Command::SetColorTemp(k) => serde_json::to_vec(&LanMessage::new(
                 "colorwc",
                 ColorwcData {
@@ -369,6 +393,26 @@ mod tests {
         assert_eq!(v["msg"]["data"]["color"]["g"], 128);
         assert_eq!(v["msg"]["data"]["color"]["b"], 0);
         assert_eq!(v["msg"]["data"]["colorTemInKelvin"], 0);
+    }
+
+    #[test]
+    fn encode_color_near_black_is_scaled_up() {
+        // Peak channel 5 < MIN_PEAK 10 → should be scaled up, hue preserved.
+        let v = decode(&encode(Command::SetColor(Color::new(0, 0, 5))));
+        assert_eq!(v["msg"]["cmd"], "colorwc");
+        // Blue was peak=5, scaled to 10; r and g stay 0.
+        assert_eq!(v["msg"]["data"]["color"]["r"], 0);
+        assert_eq!(v["msg"]["data"]["color"]["g"], 0);
+        assert_eq!(v["msg"]["data"]["color"]["b"], 10);
+    }
+
+    #[test]
+    fn encode_color_above_threshold_unchanged() {
+        // Peak = 30 ≥ 10 → no scaling.
+        let v = decode(&encode(Command::SetColor(Color::new(10, 30, 20))));
+        assert_eq!(v["msg"]["data"]["color"]["r"], 10);
+        assert_eq!(v["msg"]["data"]["color"]["g"], 30);
+        assert_eq!(v["msg"]["data"]["color"]["b"], 20);
     }
 
     #[test]
