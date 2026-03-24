@@ -70,52 +70,10 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
             ui.separator();
             ui.add_space(6.0);
 
-            if app.devices.is_empty() {
-                ui.label(
-                    RichText::new(
-                        "No devices found.\n\nEnable LAN Control\nin the Govee app\nunder Settings \u{2192} LAN Control.",
-                    )
-                    .small()
-                    .color(Color32::GRAY),
-                );
-            } else {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let count = app.devices.len();
-                    for i in 0..count {
-                        let device = &app.devices[i];
-                        let state = app.states.get(&device.mac);
-                        let is_on = state.map(|s| s.on);
-                        let is_selected = i == app.selected;
-
-                        let is_offline = app.offline_macs.contains(&device.mac);
-                        let dot = if is_offline {
-                            RichText::new("\u{2715}").color(Color32::from_rgb(220, 60, 60))
-                        } else {
-                            match is_on {
-                                Some(true) => RichText::new("\u{25cf}").color(Color32::from_rgb(80, 220, 80)),
-                                Some(false) => RichText::new("\u{25cb}").color(Color32::DARK_GRAY),
-                                None => RichText::new("\u{25cc}").color(Color32::GOLD),
-                            }
-                        };
-
-                        ui.horizontal(|ui| {
-                            ui.set_min_height(40.0);
-                            ui.label(dot);
-                            let name = device.display_name().to_string();
-                            if ui
-                                .add_sized(
-                                    egui::vec2(ui.available_width(), 40.0),
-                                    egui::SelectableLabel::new(is_selected, name),
-                                )
-                                .clicked()
-                            {
-                                app.selected = i;
-                            }
-                        });
-                    }
-                });
-            }
-
+            // Lay out the buttons first using a bottom_up region so they
+            // "claim" space from the bottom before the scroll area runs.
+            // Everything inside the bottom_up closure is positioned from
+            // the bottom of the panel upward.
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.add_space(6.0);
                 if ui
@@ -139,6 +97,58 @@ fn draw_device_panel(ctx: &egui::Context, app: &mut GoveeApp) {
                 }
                 ui.add_space(4.0);
                 ui.separator();
+
+                // Switch back to top_down for the device list, which now
+                // fills exactly the space between the header and the buttons.
+                ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    if app.devices.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "No devices found.\n\nEnable LAN Control\nin the Govee app\nunder Settings \u{2192} LAN Control.",
+                            )
+                            .small()
+                            .color(Color32::GRAY),
+                        );
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                let count = app.devices.len();
+                                for i in 0..count {
+                                    let device = &app.devices[i];
+                                    let state = app.states.get(&device.mac);
+                                    let is_on = state.map(|s| s.on);
+                                    let is_selected = i == app.selected;
+
+                                    let is_offline = app.offline_macs.contains(&device.mac);
+                                    let dot = if is_offline {
+                                        RichText::new("\u{2715}").color(Color32::from_rgb(220, 60, 60))
+                                    } else {
+                                        match is_on {
+                                            Some(true) => RichText::new("\u{25cf}").color(Color32::from_rgb(80, 220, 80)),
+                                            Some(false) => RichText::new("\u{25cb}").color(Color32::DARK_GRAY),
+                                            None => RichText::new("\u{25cc}").color(Color32::GOLD),
+                                        }
+                                    };
+
+                                    ui.horizontal(|ui| {
+                                        ui.set_min_height(40.0);
+                                        ui.label(dot);
+                                        let name = device.display_name().to_string();
+                                        if ui
+                                            .add_sized(
+                                                egui::vec2(ui.available_width(), 40.0),
+                                                egui::SelectableLabel::new(is_selected, name),
+                                            )
+                                            .clicked()
+                                        {
+                                            app.selected = i;
+                                        }
+                                    });
+                                }
+                            });
+                    }
+                });
             });
         });
 }
