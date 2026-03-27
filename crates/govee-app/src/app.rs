@@ -282,12 +282,12 @@ impl GoveeApp {
     /// Apply a scene to an arbitrary list of devices.
     /// Each device gets `palette[i % palette.len()]` at the scene's brightness.
     pub fn apply_scene_to_devices(&self, devices: Vec<Device>, scene: &scenes::Scene) {
-        let entries: Vec<(Device, Color, u8)> = devices
+        let entries: Vec<(Device, Color)> = devices
             .into_iter()
             .enumerate()
             .map(|(i, device)| {
                 let (r, g, b) = scene.palette[i % scene.palette.len()];
-                (device, Color::new(r, g, b), scene.brightness)
+                (device, Color::new(r, g, b))
             })
             .collect();
         if !entries.is_empty() {
@@ -328,25 +328,26 @@ impl GoveeApp {
                 WorkerEvent::DeviceOnline(mac) => {
                     self.offline_macs.remove(&mac);
                 }
-                WorkerEvent::StateUpdated { mac, state } => {
+                WorkerEvent::StateUpdated { mac, state, sync_controls } => {
                     // A successful state fetch is proof the device is reachable —
                     // clear any stale offline flag regardless of how it arrived.
-                    // This fixes cases where DeviceOnline was never sent (e.g.
-                    // after Rediscover clears the worker's offline map before
-                    // try_refresh runs).
                     self.offline_macs.remove(&mac);
-                    // Mirror real device state into the pending controls.
-                    self.pending_brightness = state.brightness;
-                    if state.color_temp_kelvin > 0 {
-                        self.use_color_temp = true;
-                        self.pending_color_temp = state.color_temp_kelvin;
-                    } else {
-                        self.use_color_temp = false;
-                        self.pending_color = [
-                            state.color.r as f32 / 255.0,
-                            state.color.g as f32 / 255.0,
-                            state.color.b as f32 / 255.0,
-                        ];
+                    // Only mirror device state into the pending controls on
+                    // initial discovery / manual refresh — not after commands,
+                    // so the user's slider position is not overwritten.
+                    if sync_controls {
+                        self.pending_brightness = state.brightness;
+                        if state.color_temp_kelvin > 0 {
+                            self.use_color_temp = true;
+                            self.pending_color_temp = state.color_temp_kelvin;
+                        } else {
+                            self.use_color_temp = false;
+                            self.pending_color = [
+                                state.color.r as f32 / 255.0,
+                                state.color.g as f32 / 255.0,
+                                state.color.b as f32 / 255.0,
+                            ];
+                        }
                     }
                     self.states.insert(mac, state);
                 }

@@ -304,7 +304,7 @@ fn draw_individual(ui: &mut egui::Ui, app: &mut GoveeApp) {
             if app.use_color_temp {
                 ui.add_sized(
                     [ui.available_width(), 40.0],
-                    egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000)
+                    egui::Slider::new(&mut app.pending_color_temp, 2_700_u16..=6_500)
                         .suffix(" K"),
                 );
                 ui.horizontal(|ui| {
@@ -451,7 +451,7 @@ fn draw_all_lights(ui: &mut egui::Ui, app: &mut GoveeApp) {
         if app.use_color_temp {
             ui.add_sized(
                 [ui.available_width(), 40.0],
-                egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000).suffix(" K"),
+                egui::Slider::new(&mut app.pending_color_temp, 2_700_u16..=6_500).suffix(" K"),
             );
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Warm").color(Color32::from_rgb(255, 180, 80)).small());
@@ -535,6 +535,21 @@ fn draw_all_lights(ui: &mut egui::Ui, app: &mut GoveeApp) {
                 ui.end_row();
             }
         });
+
+    // ── Exit ──────────────────────────────────────────────────────────────────
+    ui.add_space(24.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        if ui
+            .add(egui::Button::new(
+                RichText::new("Exit").color(Color32::from_gray(100)).small(),
+            ))
+            .clicked()
+        {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    });
 }
 
 // ── Group tab ─────────────────────────────────────────────────────────────────
@@ -696,7 +711,7 @@ fn draw_group(ui: &mut egui::Ui, app: &mut GoveeApp, idx: usize) {
             if app.use_color_temp {
                 ui.add_sized(
                     [ui.available_width(), 40.0],
-                    egui::Slider::new(&mut app.pending_color_temp, 2_000_u16..=9_000)
+                    egui::Slider::new(&mut app.pending_color_temp, 2_700_u16..=6_500)
                         .suffix(" K"),
                 );
                 ui.horizontal(|ui| {
@@ -878,8 +893,10 @@ fn draw_scene_picker(
 
 /// Render a labelled, framed section of controls.
 fn section(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui)) {
+    // Subtract scrollbar footprint (bar_width 20 + inner_margin 4 + outer_margin 2 = 26).
+    const SCROLLBAR_W: f32 = 26.0;
     egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
+        ui.set_min_width((ui.available_width() - SCROLLBAR_W).max(0.0));
         ui.label(RichText::new(title).strong());
         ui.add_space(4.0);
         content(ui);

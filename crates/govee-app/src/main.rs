@@ -97,7 +97,8 @@ fn main() -> eframe::Result {
             .with_title("Govee Lights")
             .with_icon(light_bulb_icon())
             .with_inner_size([800.0, 480.0])
-            .with_min_inner_size([800.0, 480.0]),
+            .with_min_inner_size([800.0, 480.0])
+            .with_fullscreen(true),
         ..Default::default()
     };
 

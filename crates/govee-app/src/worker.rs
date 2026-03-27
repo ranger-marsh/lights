@@ -60,7 +60,7 @@ pub enum Command {
     Broadcast(Vec<Device>, BroadcastAction),
     /// Apply a scene: turn each device on, set its paired colour and brightness,
     /// then refresh.  Each entry is `(device, rgb_color, brightness_pct)`.
-    ApplyScene(Vec<(Device, Color, u8)>),
+    ApplyScene(Vec<(Device, Color)>),
 }
 
 /// The control action applied to all devices in a [`Command::Broadcast`].
@@ -76,7 +76,12 @@ pub enum BroadcastAction {
 #[derive(Debug)]
 pub enum WorkerEvent {
     Discovered(Vec<Device>),
-    StateUpdated { mac: String, state: DeviceState },
+    /// Device state received from the network.
+    /// `sync_controls` — when `true` the GUI should mirror the state into the
+    /// pending sliders/pickers (used on initial discovery / manual refresh).
+    /// Post-command refreshes set this to `false` so the user's slider position
+    /// is not overwritten immediately after clicking Apply.
+    StateUpdated { mac: String, state: DeviceState, sync_controls: bool },
     /// A device failed a state refresh and has entered the reconnect backoff.
     DeviceOffline(String),
     /// A device that was offline has successfully responded again.
@@ -178,7 +183,7 @@ async fn discover(
             }
 
             for device in &devices {
-                try_refresh(lan, send, device, offline).await;
+                try_refresh(lan, send, device, offline, true).await;
             }
 
             *known = devices;
@@ -217,7 +222,7 @@ async fn retry_offline(
             Ok(state) => {
                 offline.remove(&mac);
                 send(WorkerEvent::DeviceOnline(mac.clone()));
-                send(WorkerEvent::StateUpdated { mac, state });
+                send(WorkerEvent::StateUpdated { mac, state, sync_controls: true });
                 send(WorkerEvent::Status(format!(
                     "{} reconnected.",
                     device.display_name()
@@ -238,11 +243,15 @@ async fn retry_offline(
 /// Query a device's state. On success sends [`WorkerEvent::StateUpdated`] and
 /// removes the device from the offline map. On failure, adds it to the offline
 /// map (or updates its backoff if already there) and sends [`WorkerEvent::DeviceOffline`].
+///
+/// `sync_controls` is forwarded to the GUI — pass `false` for post-command
+/// refreshes so the user's slider position is not overwritten.
 async fn try_refresh(
     lan: &LanClient,
     send: &impl Fn(WorkerEvent),
     device: &Device,
     offline: &mut HashMap<String, OfflineEntry>,
+    sync_controls: bool,
 ) {
     match lan.get_state(device, STATE_TIMEOUT).await {
         Ok(state) => {
@@ -253,6 +262,7 @@ async fn try_refresh(
             send(WorkerEvent::StateUpdated {
                 mac: device.mac.clone(),
                 state,
+                sync_controls,
             });
         }
         Err(e) => {
@@ -278,6 +288,7 @@ async fn try_refresh(
 }
 
 /// Wait briefly after a control command, then refresh state.
+/// Does NOT sync pending controls — the user's slider position is preserved.
 async fn post_command_refresh(
     lan: &LanClient,
     send: &impl Fn(WorkerEvent),
@@ -285,7 +296,7 @@ async fn post_command_refresh(
     offline: &mut HashMap<String, OfflineEntry>,
 ) {
     tokio::time::sleep(POST_COMMAND_DELAY).await;
-    try_refresh(lan, send, device, offline).await;
+    try_refresh(lan, send, device, offline, false).await;
 }
 
 // ── Command handling ──────────────────────────────────────────────────────────
@@ -359,7 +370,7 @@ async fn handle_command(
         }
 
         Command::RefreshState(device) => {
-            try_refresh(lan, send, &device, offline).await;
+            try_refresh(lan, send, &device, offline, true).await;
             if !offline.contains_key(&device.mac) {
                 send(WorkerEvent::Status(format!(
                     "{} state refreshed.",
@@ -379,7 +390,7 @@ async fn handle_command(
             )));
             let snapshot = known.clone();
             for device in &snapshot {
-                try_refresh(lan, send, device, offline).await;
+                try_refresh(lan, send, device, offline, true).await;
             }
             let online = count - offline.len();
             send(WorkerEvent::Status(format!(
@@ -398,20 +409,17 @@ async fn handle_command(
                 "Applying scene to {count} device(s)\u{2026}"
             )));
 
-            for (device, color, brightness) in &entries {
+            for (device, color) in &entries {
                 // Turn the light on so the scene is immediately visible.
                 let _ = lan.set_power(device, true).await;
-                if let Err(e) = lan.set_brightness(device, *brightness).await {
-                    warn!("Scene brightness error for {}: {e}", device.display_name());
-                }
                 if let Err(e) = lan.set_color(device, *color).await {
                     warn!("Scene color error for {}: {e}", device.display_name());
                 }
             }
 
             tokio::time::sleep(POST_COMMAND_DELAY).await;
-            for (device, _, _) in &entries {
-                try_refresh(lan, send, device, offline).await;
+            for (device, _) in &entries {
+                try_refresh(lan, send, device, offline, false).await;
             }
             send(WorkerEvent::Status("Scene applied.".into()));
         }
@@ -446,7 +454,7 @@ async fn handle_command(
 
             tokio::time::sleep(POST_COMMAND_DELAY).await;
             for device in &devices {
-                try_refresh(lan, send, device, offline).await;
+                try_refresh(lan, send, device, offline, false).await;
             }
             send(WorkerEvent::Status("All lights updated.".into()));
         }
